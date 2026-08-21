@@ -1,0 +1,44 @@
+{
+  "sources_total": 3,
+  "sources_downloaded": 3,
+  "found": 384,
+  "valid_before_dedup": 384,
+  "malformed": 0,
+  "duplicates": 144,
+  "unique": 240,
+  "protocols": {
+    "hy2": 0,
+    "hysteria2": 50,
+    "ss": 0,
+    "trojan": 13,
+    "tuic": 0,
+    "vless": 160,
+    "vmess": 17
+  },
+  "per_source": {
+    "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/BLACK_VLESS_RUS.txt": {
+      "download_ok": true,
+      "found": 158,
+      "valid": 158,
+      "malformed": 0,
+      "duplicates": 0,
+      "unique_contribution": 158
+    },
+    "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/BLACK_VLESS_RUS_mobile.txt": {
+      "download_ok": true,
+      "found": 147,
+      "valid": 147,
+      "malformed": 0,
+      "duplicates": 94,
+      "unique_contribution": 53
+    },
+    "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/BLACK_SS%2BAll_RUS.txt": {
+      "download_ok": true,
+      "found": 79,
+      "valid": 79,
+      "malformed": 0,
+      "duplicates": 50,
+      "unique_contribution": 29
+    }
+  }
+}
