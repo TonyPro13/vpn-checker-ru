@@ -1,9 +1,9 @@
-# One subscription/source URL per line.
-# Empty lines and lines beginning with # are ignored.
-#
-# These three are used only as a known-good starting point.
-# Later we will expand this file with independent mass sources.
+# Initial ~10,000 unique-key test.
+# collector.py stops automatically at MAX_UNIQUE=10000.
 
+# Large independent pool
+https://raw.githubusercontent.com/morpheusadam/v2ray-config/main/subs/bundles/all.txt
+
+# Control/reference source
 https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/BLACK_VLESS_RUS.txt
-https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/BLACK_VLESS_RUS_mobile.txt
 https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/BLACK_SS%2BAll_RUS.txt
