@@ -1,0 +1,69 @@
+name: Build Yandex Mihomo probe
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download latest stable Mihomo
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TAG="$(curl -fsSL https://api.github.com/repos/MetaCubeX/mihomo/releases/latest | jq -r '.tag_name')"
+          test -n "$TAG"
+          test "$TAG" != "null"
+
+          URL="https://github.com/MetaCubeX/mihomo/releases/download/${TAG}/mihomo-linux-amd64-compatible-${TAG}.gz"
+
+          echo "Mihomo release: $TAG"
+          echo "Downloading: $URL"
+
+          curl -fL --retry 3 "$URL" -o mihomo.gz
+          gzip -d mihomo.gz
+          chmod +x mihomo
+
+          ./mihomo -v
+          file ./mihomo
+
+          # Yandex Bash functions require uploaded executables to be static.
+          if ldd ./mihomo 2>&1 | grep -Eq '=>|ld-linux'; then
+            echo "::error::Mihomo binary appears dynamically linked."
+            ldd ./mihomo || true
+            exit 1
+          fi
+
+          echo "Mihomo binary appears suitable for an isolated function runtime."
+
+      - name: Build function ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x yandex_probe/handler.sh
+          cp mihomo yandex_probe/mihomo
+
+          cd yandex_probe
+          zip -9 ../yandex-mihomo-probe.zip handler.sh probe_config.yaml mihomo
+          cd ..
+
+          echo "===== package ====="
+          ls -lh yandex-mihomo-probe.zip
+          unzip -l yandex-mihomo-probe.zip
+
+      - name: Upload function package
+        uses: actions/upload-artifact@v4
+        with:
+          name: yandex-mihomo-probe
+          path: yandex-mihomo-probe.zip
+          if-no-files-found: error
+          retention-days: 7
