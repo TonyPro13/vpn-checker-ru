@@ -1,1 +1,76 @@
+project:
+  name: vpn-checker-ru
+  target: russian_users
+  primary_core: mihomo
 
+collection:
+  # GitHub performs only:
+  # collect -> parse -> normalize -> deduplicate
+  network_checks_on_github: false
+
+protocols:
+  - vless
+  - vmess
+  - trojan
+  - ss
+  - hysteria2
+  - hy2
+  - tuic
+
+ru_check:
+  required: true
+
+  # First mass real-world test of all unique configs.
+  first_mihomo_test:
+    enabled: true
+    core: mihomo
+    run_from_russia: true
+
+  # Mandatory real-service cascade.
+  service_cascade:
+    enabled: true
+    run_from_russia: true
+
+  # Second Mihomo test after the service cascade.
+  final_mihomo_test:
+    enabled: true
+    core: mihomo
+    run_from_russia: true
+
+speed_test:
+  enabled: true
+
+  # Speed is a PASS/FAIL threshold only.
+  # The exact minimum will be determined from real measurements.
+  minimum_mbps: null
+
+ranking:
+  # Ranking is calculated only after the speed test.
+  # Among configs that pass the minimum speed threshold,
+  # lower final RU Mihomo latency ranks higher.
+  primary_metric: final_ru_latency
+  order: ascending
+
+compatibility:
+  # Mihomo is the primary and reference core.
+  primary:
+    - mihomo
+
+  # The published universal subscription should also remain
+  # compatible with clients based on the sing-box ecosystem.
+  additional:
+    - sing-box
+    - hiddify
+    - lxbox
+
+naming:
+  include_protocol: true
+  include_flag: true
+  include_country: true
+  include_city: true
+  include_ip: true
+
+  format: "[{protocol}] {flag} {country} | {city} | {ip}"
+
+output:
+  universal_subscription: true
