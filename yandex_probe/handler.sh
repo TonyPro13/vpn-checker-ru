@@ -9,8 +9,13 @@ ROOT="$(cd "$(dirname "$0")" && pwd)"
 WORK="/tmp/mihomo-probe"
 mkdir -p "$WORK"
 
+# /function/code is read-only in Yandex Cloud Functions.
+# Copy writable/runtime files to /tmp.
 cp "$ROOT/probe_config.yaml" "$WORK/config.yaml"
-chmod +x "$ROOT/mihomo"
+cp "$ROOT/mihomo" "$WORK/mihomo"
+
+MIHOMO_BIN="$WORK/mihomo"
+chmod +x "$MIHOMO_BIN"
 
 cleanup() {
   if [[ -n "${MIHOMO_PID:-}" ]]; then
@@ -20,9 +25,9 @@ cleanup() {
 }
 trap cleanup EXIT
 
-VERSION="$("$ROOT/mihomo" -v 2>&1 | head -n 1)"
+VERSION="$("$MIHOMO_BIN" -v 2>&1 | head -n 1)"
 
-"$ROOT/mihomo" -d "$WORK" -f "$WORK/config.yaml" \
+"$MIHOMO_BIN" -d "$WORK" -f "$WORK/config.yaml" \
   >"$WORK/mihomo.stdout.log" \
   2>"$WORK/mihomo.stderr.log" &
 MIHOMO_PID=$!
@@ -49,8 +54,6 @@ if [[ "$READY" != "1" ]]; then
 fi
 
 # Ask Mihomo itself to perform a real HTTPS delay test through DIRECT.
-# This proves that the Mihomo core can make outbound traffic from the
-# Yandex Cloud Function environment.
 HTTP_RESPONSE="$(
   exec 3<>/dev/tcp/127.0.0.1/9090
   printf '%s\r\n' \
