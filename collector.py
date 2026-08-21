@@ -26,6 +26,7 @@ SUPPORTED = {
 
 FETCH_TIMEOUT = float(os.getenv("FETCH_TIMEOUT_SECONDS", "30"))
 FETCH_WORKERS = int(os.getenv("FETCH_WORKERS", "16"))
+MAX_UNIQUE = int(os.getenv("MAX_UNIQUE", "10000"))
 
 URI_RE = re.compile(
     r"(?:(?:vless|vmess|trojan|ss|hysteria2|hy2|tuic)://)[^\s]+",
@@ -345,7 +346,13 @@ def collect():
             unique[key] = uri
             stats["unique_contribution"] += 1
 
+            if MAX_UNIQUE > 0 and len(unique) >= MAX_UNIQUE:
+                break
+
         per_source[url] = stats
+
+        if MAX_UNIQUE > 0 and len(unique) >= MAX_UNIQUE:
+            break
 
     UNIQUE_FILE.write_text(
         "\n".join(unique.values()) + ("\n" if unique else ""),
@@ -358,6 +365,7 @@ def collect():
         protocol_counts[scheme] = protocol_counts.get(scheme, 0) + 1
 
     summary = {
+        "max_unique": MAX_UNIQUE,
         "sources_total": len(sources),
         "sources_downloaded": sum(
             1 for item in per_source.values() if item.get("download_ok")
