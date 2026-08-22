@@ -1,0 +1,179 @@
+name: Build Yandex RU 10000 + Speed Stats
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python build dependency
+        run: python -m pip install --disable-pip-version-check PyYAML
+
+      - name: Download latest stable Mihomo
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TAG="$(curl -fsSL https://api.github.com/repos/MetaCubeX/mihomo/releases/latest | jq -r '.tag_name')"
+          test -n "$TAG"
+          test "$TAG" != "null"
+
+          URL="https://github.com/MetaCubeX/mihomo/releases/download/${TAG}/mihomo-linux-amd64-compatible-${TAG}.gz"
+
+          curl -fL --retry 3 "$URL" -o mihomo.gz
+          gzip -d mihomo.gz
+          chmod +x mihomo
+
+          ./mihomo -v
+
+          if ldd ./mihomo 2>&1 | grep -Eq '=>|ld-linux'; then
+            echo "::error::Mihomo binary appears dynamically linked."
+            ldd ./mihomo || true
+            exit 1
+          fi
+
+      - name: Build static speed probe
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+            go build -trimpath -ldflags="-s -w" \
+            -o speed_probe yandex_probe/speed_probe.go
+
+          chmod +x speed_probe
+          file speed_probe
+          ls -lh speed_probe
+
+      - name: Convert current 10000 and preserve URI mapping
+        run: |
+          python yandex_probe/build_ru_output_batch.py \
+            --input output/unique.txt \
+            --limit 10000 \
+            --output-dir yandex_probe/generated_ru_speed
+
+          echo "===== conversion metadata ====="
+          cat yandex_probe/generated_ru_speed/meta.json
+
+      - name: Remove only configs rejected by Mihomo syntax validation
+        run: |
+          python yandex_probe/sanitize_mihomo_config.py \
+            --mihomo ./mihomo \
+            --config yandex_probe/generated_ru_speed/config.yaml \
+            --meta yandex_probe/generated_ru_speed/meta.json \
+            --rejected yandex_probe/generated_ru_speed/mihomo_rejected.json
+
+          echo
+          echo "===== sanitized metadata ====="
+          cat yandex_probe/generated_ru_speed/meta.json
+
+      - name: Export accepted proxy definitions for runtime speed stage
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          import yaml
+
+          src = Path("yandex_probe/generated_ru_speed/config.yaml")
+          dst = Path("yandex_probe/generated_ru_speed/proxy_defs.json")
+
+          cfg = yaml.safe_load(src.read_text(encoding="utf-8"))
+          proxies = cfg.get("proxies") or []
+
+          defs = {proxy["name"]: proxy for proxy in proxies}
+
+          dst.write_text(
+              json.dumps(defs, ensure_ascii=False, separators=(",", ":")),
+              encoding="utf-8",
+          )
+
+          print("proxy_defs:", len(defs))
+          PY
+
+          jq 'length' yandex_probe/generated_ru_speed/proxy_defs.json
+
+      - name: Split sanitized config into RU batches
+        run: |
+          python yandex_probe/split_mihomo_batches.py \
+            --config yandex_probe/generated_ru_speed/config.yaml \
+            --meta yandex_probe/generated_ru_speed/meta.json \
+            --output-dir yandex_probe/generated_ru_speed/chunks \
+            --chunk-size 1000
+
+          cat yandex_probe/generated_ru_speed/chunks/manifest.json
+
+      - name: Validate every exact RU batch
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          while IFS= read -r file; do
+            echo "Validating $file"
+            ./mihomo -t -f "$file"
+          done < <(find yandex_probe/generated_ru_speed/chunks -name 'config_*.yaml' | sort)
+
+      - name: Build Yandex RU plus speed package
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf package_ru_speed
+          mkdir package_ru_speed
+
+          cp mihomo package_ru_speed/mihomo
+          cp speed_probe package_ru_speed/speed_probe
+          cp yandex_probe/handler_ru_10000_speed.sh package_ru_speed/handler.sh
+          cp yandex_probe/generated_ru_speed/meta.json package_ru_speed/meta.json
+          cp yandex_probe/generated_ru_speed/mapping.json package_ru_speed/mapping.json
+          cp yandex_probe/generated_ru_speed/proxy_defs.json package_ru_speed/proxy_defs.json
+          cp yandex_probe/generated_ru_speed/chunks/manifest.json package_ru_speed/manifest.json
+          cp yandex_probe/generated_ru_speed/chunks/config_*.yaml package_ru_speed/
+
+          chmod +x \
+            package_ru_speed/handler.sh \
+            package_ru_speed/mihomo \
+            package_ru_speed/speed_probe
+
+          cd package_ru_speed
+          zip -9 ../yandex-mihomo-ru-10000-speed.zip \
+            handler.sh \
+            meta.json \
+            mapping.json \
+            proxy_defs.json \
+            manifest.json \
+            config_*.yaml \
+            mihomo \
+            speed_probe
+          cd ..
+
+          echo "===== package ====="
+          ls -lh yandex-mihomo-ru-10000-speed.zip
+          unzip -l yandex-mihomo-ru-10000-speed.zip | tail -n 25
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: yandex-mihomo-ru-10000-speed
+          path: |
+            yandex-mihomo-ru-10000-speed.zip
+            yandex_probe/generated_ru_speed/meta.json
+            yandex_probe/generated_ru_speed/mihomo_rejected.json
+          if-no-files-found: error
+          retention-days: 7
