@@ -469,6 +469,22 @@ jq -cn \
         end
     end;
 
+  def regular_named_uri($uri; $name):
+    (($uri // "") | split("#")[0])
+    + "#"
+    + ($name | @uri);
+
+  def vmess_named_uri($uri; $name):
+    try (
+      (($uri | split("#")[0] | sub("^vmess://"; ""))
+        | @base64d
+        | fromjson
+        | .ps = $name
+        | tojson
+        | @base64) as $payload
+      | ("vmess://" + $payload)
+    ) catch null;
+
   ($meta[0] // {}) as $meta
   | ($manifest[0] // {}) as $manifest
   | ($mapping[0] // {}) as $mapping
@@ -534,17 +550,7 @@ jq -cn \
               then ($flag + " " + $country + " " + $city + " | " + $type + " | " + $exit_ip)
               else null
               end
-            ) as $display_name
-          | (
-              if $geo_complete
-              then (
-                (($s.uri // "") | split("#")[0])
-                + "#"
-                + ($display_name | @uri)
-              )
-              else null
-              end
-            ) as $named_uri
+            ) as $base_display_name
           | . + {
               geo_ok:$geo_complete,
               exit_ip:(if ($exit_ip|length)>0 then $exit_ip else null end),
@@ -554,24 +560,54 @@ jq -cn \
               flag:$flag,
               geo_source:($g.source // null),
               geo_error:($g.error // null),
-              display_name:$display_name,
-              named_uri:$named_uri
+              base_display_name:$base_display_name
             }
         )
-    ) as $after_speed_with_geo
-  | (
-      $after_speed_with_geo
       | map(select(.geo_ok == true))
       | sort_by(.ru_delay_ms)
-    ) as $final_survivors
-  | (($after_speed|length) - ($final_survivors|length)) as $removed_geo_failed
+    ) as $geo_pass_sorted
+  | (
+      reduce $geo_pass_sorted[] as $item (
+        {counts:{}, items:[], duplicate_suffixes_added:0, vmess_ps_rewritten:0, naming_failed:0};
+        ($item.base_display_name) as $base
+        | ((.counts[$base] // 0) + 1) as $seq
+        | .counts[$base] = $seq
+        | (
+            $base
+            + (if $seq > 1 then (" | " + ($seq|tostring)) else "" end)
+          ) as $display_name
+        | (
+            if ($item.protocol // "") == "vmess"
+            then vmess_named_uri($item.uri; $display_name)
+            else regular_named_uri($item.uri; $display_name)
+            end
+          ) as $named_uri
+        | if $named_uri == null or ($named_uri|length) == 0 then
+            .naming_failed += 1
+          else
+            .items += [
+              $item
+              | del(.base_display_name)
+              | . + {
+                  display_name:$display_name,
+                  named_uri:$named_uri,
+                  name_sequence:$seq
+                }
+            ]
+            | if $seq > 1 then .duplicate_suffixes_added += 1 else . end
+            | if ($item.protocol // "") == "vmess" then .vmess_ps_rewritten += 1 else . end
+          end
+      )
+    ) as $naming
+  | ($naming.items) as $final_survivors
+  | (($after_speed|length) - ($geo_pass_sorted|length)) as $removed_geo_failed
   | ([$survivors[] | select(.speed_test_ok != true)] | length) as $removed_speed_failed
   | ([$survivors[] | select(.speed_test_ok == true and (.speed_mbps // 0) < $speed_min_mbps)] | length) as $removed_below_threshold
   | {
       ok:true,
       mihomo_version:$version,
       location:"yandex_ru",
-      stage:"ru_mihomo_speed_ipwho_geo_strict_naming",
+      stage:"ru_mihomo_speed_ipwho_geo_strict_unique_naming",
       ranking_rule:"strict speed gate first, then ranking only by RU latency",
       strategy:"RU delay -> strict speed gate -> ipwho.is exit geolocation -> strict geo gate -> naming",
       speed_filter_rule:{
@@ -657,7 +693,13 @@ jq -cn \
         removed_geo_failed:$removed_geo_failed,
         final_count:($final_survivors|length)
       },
-      naming_format:"FLAG Country City | TYPE | EXIT_IP",
+      naming:{
+        format:"FLAG Country City | TYPE | EXIT_IP",
+        unique_names:true,
+        duplicate_suffixes_added:$naming.duplicate_suffixes_added,
+        vmess_ps_rewritten:$naming.vmess_ps_rewritten,
+        naming_failed:$naming.naming_failed
+      },
       final_fastest_20:($final_survivors[0:20]),
       chunks:$chunks,
       final_survivors:$final_survivors,
