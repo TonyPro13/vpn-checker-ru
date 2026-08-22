@@ -186,40 +186,49 @@ done < <(
 TOTAL_END_MS="$(date +%s%3N)"
 TOTAL_ELAPSED_MS=$((TOTAL_END_MS - TOTAL_START_MS))
 
-META_JSON="$(cat "$META")"
-MANIFEST_JSON="$(cat "$MANIFEST")"
-MAPPING_JSON="$(cat "$MAPPING")"
+ALIVE_ARRAY_FILE="$BASE_WORK/alive.json"
+CHUNKS_ARRAY_FILE="$BASE_WORK/chunks.json"
+SUMMARY_FILE="$BASE_WORK/summary.json"
 
 if [[ -s "$ALIVE_JSONL" ]]; then
-  ALIVE_ARRAY="$(jq -sc 'sort_by(.value)' "$ALIVE_JSONL")"
+  jq -sc 'sort_by(.value)' "$ALIVE_JSONL" >"$ALIVE_ARRAY_FILE"
 else
-  ALIVE_ARRAY='[]'
+  printf '[]\n' >"$ALIVE_ARRAY_FILE"
 fi
 
-CHUNKS_ARRAY="$(jq -sc '.' "$CHUNKS_JSONL")"
+jq -sc '.' "$CHUNKS_JSONL" >"$CHUNKS_ARRAY_FILE"
 
-SUMMARY="$(
-  jq -cn \
-    --arg version "$VERSION" \
-    --argjson total_elapsed "$TOTAL_ELAPSED_MS" \
-    --argjson meta "$META_JSON" \
-    --argjson manifest "$MANIFEST_JSON" \
-    --argjson mapping "$MAPPING_JSON" \
-    --argjson alive_nodes "$ALIVE_ARRAY" \
-    --argjson chunks "$CHUNKS_ARRAY" '
-    def pct($a; $p):
-      if ($a|length) == 0 then null
-      elif ($a|length) == 1 then $a[0]
-      else
-        ((($a|length)-1) * $p) as $r
-        | ($r|floor) as $lo
-        | ($r|ceil) as $hi
-        | if $lo == $hi then $a[$lo]
-          else (($a[$lo] * ($hi-$r)) + ($a[$hi] * ($r-$lo)))
-          end
-      end;
+# IMPORTANT:
+# mapping.json can be large (10k original URIs). Do not pass it to jq via
+# --argjson: Linux limits the total argv size and that caused
+# "/function/runtime/jq: Argument list too long".
+# Read all large JSON values directly from files instead.
+jq -cn \
+  --arg version "$VERSION" \
+  --argjson total_elapsed "$TOTAL_ELAPSED_MS" \
+  --slurpfile meta "$META" \
+  --slurpfile manifest "$MANIFEST" \
+  --slurpfile mapping "$MAPPING" \
+  --slurpfile alive_nodes "$ALIVE_ARRAY_FILE" \
+  --slurpfile chunks "$CHUNKS_ARRAY_FILE" '
+  def pct($a; $p):
+    if ($a|length) == 0 then null
+    elif ($a|length) == 1 then $a[0]
+    else
+      ((($a|length)-1) * $p) as $r
+      | ($r|floor) as $lo
+      | ($r|ceil) as $hi
+      | if $lo == $hi then $a[$lo]
+        else (($a[$lo] * ($hi-$r)) + ($a[$hi] * ($r-$lo)))
+        end
+    end;
 
-    (
+  ($meta[0] // {}) as $meta
+  | ($manifest[0] // {}) as $manifest
+  | ($mapping[0] // {}) as $mapping
+  | ($alive_nodes[0] // []) as $alive_nodes
+  | ($chunks[0] // []) as $chunks
+  | (
       $alive_nodes
       | map(
           . as $alive
@@ -234,38 +243,52 @@ SUMMARY="$(
             }
         )
     ) as $survivors
-    | ($survivors | map(.ru_delay_ms)) as $vals
-    | {
-        ok:true,
-        mihomo_version:$version,
-        location:"yandex_ru",
-        stage:"ru_mihomo_filter",
-        strategy:"sequential_chunks",
-        chunk_size:$manifest.chunk_size,
-        chunks_total:$manifest.chunks_total,
-        function_elapsed_ms:$total_elapsed,
-        requested:($meta.requested // null),
-        pool_size:($meta.pool_size // null),
-        selected:($meta.selected // null),
-        converted_before_mihomo_validation:($meta.converted_before_mihomo_validation // null),
-        converted:($meta.converted // null),
-        conversion_failed:($meta.conversion_failed // null),
-        mihomo_validation:($meta.mihomo_validation // {}),
-        protocols_selected:($meta.protocols_selected // {}),
-        alive:($survivors|length),
-        dead_or_timeout:(($meta.converted // 0)-($survivors|length)),
-        mapping_missing:([$survivors[] | select(.uri == null)] | length),
-        latency_ms:{
-          min:(if ($vals|length)>0 then ($vals|min) else null end),
-          p50:pct($vals;0.50),
-          p90:pct($vals;0.90),
-          max:(if ($vals|length)>0 then ($vals|max) else null end),
-          average:(if ($vals|length)>0 then (($vals|add)/($vals|length)) else null end)
-        },
-        fastest_20:($survivors[0:20]),
-        chunks:$chunks,
-        survivors:$survivors
-      }'
-)"
+  | ($survivors | map(.ru_delay_ms)) as $vals
+  | {
+      ok:true,
+      mihomo_version:$version,
+      location:"yandex_ru",
+      stage:"ru_mihomo_filter",
+      strategy:"sequential_chunks",
+      chunk_size:$manifest.chunk_size,
+      chunks_total:$manifest.chunks_total,
+      function_elapsed_ms:$total_elapsed,
+      requested:($meta.requested // null),
+      pool_size:($meta.pool_size // null),
+      selected:($meta.selected // null),
+      converted_before_mihomo_validation:($meta.converted_before_mihomo_validation // null),
+      converted:($meta.converted // null),
+      conversion_failed:($meta.conversion_failed // null),
+      mihomo_validation:($meta.mihomo_validation // {}),
+      protocols_selected:($meta.protocols_selected // {}),
+      alive:($survivors|length),
+      dead_or_timeout:(($meta.converted // 0)-($survivors|length)),
+      mapping_missing:([$survivors[] | select(.uri == null)] | length),
+      latency_ms:{
+        min:(if ($vals|length)>0 then ($vals|min) else null end),
+        p50:pct($vals;0.50),
+        p90:pct($vals;0.90),
+        max:(if ($vals|length)>0 then ($vals|max) else null end),
+        average:(if ($vals|length)>0 then (($vals|add)/($vals|length)) else null end)
+      },
+      fastest_20:($survivors[0:20]),
+      chunks:$chunks,
+      survivors:$survivors
+    }' >"$SUMMARY_FILE"
 
-respond 200 "$SUMMARY"
+SUMMARY_STATUS=$?
+if [[ "$SUMMARY_STATUS" -ne 0 || ! -s "$SUMMARY_FILE" ]]; then
+  BODY="$(jq -cn \
+    --argjson status "$SUMMARY_STATUS" \
+    '{ok:false,error:"summary_generation_failed",jq_exit_status:$status}')"
+  respond 500 "$BODY"
+fi
+
+# Do not pass the large final body as --arg either. Read it from disk.
+# Cloud Functions expects body to be a string in this raw integration shape.
+jq -cn \
+  --argjson status 200 \
+  --rawfile body "$SUMMARY_FILE" \
+  '{statusCode:$status,body:$body}'
+
+exit 0
