@@ -285,7 +285,7 @@ if [[ "$ALIVE_COUNT" -gt 0 ]]; then
   echo "Speed stage v2: alive=$ALIVE_COUNT workers=$SPEED_WORKERS bytes_each=$SPEED_BYTES" >&2
 
   set +e
-  "$MIHOMO_BIN" -t -f "$SPEED_CONFIG" \
+  "$MIHOMO_BIN" -t -d "$SPEED_WORK" -f "$SPEED_CONFIG" \
     >"$BASE_WORK/speed_validate.stdout.log" \
     2>"$BASE_WORK/speed_validate.stderr.log"
   SPEED_VALIDATE_STATUS=$?
