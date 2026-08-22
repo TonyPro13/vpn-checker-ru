@@ -574,9 +574,23 @@ jq -cn \
         )
       | map(select(.geo_ok == true))
       | sort_by(.ru_delay_ms)
-    ) as $geo_pass_sorted
+    ) as $geo_complete_sorted
   | (
-      reduce $geo_pass_sorted[] as $item (
+      $geo_complete_sorted
+      | map(
+          select(
+            (
+              ((.country_code // "") | ascii_upcase) != "RU"
+              and ((.country_code // "") | ascii_upcase) != "UA"
+              and ((.country // "") | ascii_downcase) != "russia"
+              and ((.country // "") | ascii_downcase) != "russian federation"
+              and ((.country // "") | ascii_downcase) != "ukraine"
+            )
+          )
+        )
+    ) as $geo_allowed_sorted
+  | (
+      reduce $geo_allowed_sorted[] as $item (
         {counts:{}, items:[], duplicate_suffixes_added:0, vmess_ps_rewritten:0, naming_failed:0};
         ($item.base_display_name) as $base
         | ((.counts[$base] // 0) + 1) as $seq
@@ -609,16 +623,34 @@ jq -cn \
       )
     ) as $naming
   | ($naming.items) as $final_survivors
-  | (($after_speed|length) - ($geo_pass_sorted|length)) as $removed_geo_failed
+  | (($after_speed|length) - ($geo_complete_sorted|length)) as $removed_geo_failed
+  | (
+      [$geo_complete_sorted[]
+       | select(
+           ((.country_code // "") | ascii_upcase) == "RU"
+           or ((.country // "") | ascii_downcase) == "russia"
+           or ((.country // "") | ascii_downcase) == "russian federation"
+         )]
+      | length
+    ) as $removed_country_ru
+  | (
+      [$geo_complete_sorted[]
+       | select(
+           ((.country_code // "") | ascii_upcase) == "UA"
+           or ((.country // "") | ascii_downcase) == "ukraine"
+         )]
+      | length
+    ) as $removed_country_ua
+  | (($geo_complete_sorted|length) - ($geo_allowed_sorted|length)) as $removed_country_excluded
   | ([$survivors[] | select(.speed_test_ok != true)] | length) as $removed_speed_failed
   | ([$survivors[] | select(.speed_test_ok == true and (.speed_mbps // 0) < $speed_min_mbps)] | length) as $removed_below_threshold
   | {
       ok:true,
       mihomo_version:$version,
       location:"yandex_ru",
-      stage:"ru_mihomo_speed_ipwho_geo_strict_unique_naming",
+      stage:"ru_mihomo_speed_ipwho_geo_strict_country_exclusion_unique_naming",
       ranking_rule:"strict speed gate first, then ranking only by RU latency",
-      strategy:"RU delay -> strict speed gate -> ipwho.is exit geolocation -> strict geo gate -> naming",
+      strategy:"RU delay -> strict speed gate -> ipwho.is exit geolocation -> strict geo gate -> exclude RU/UA exits -> naming",
       speed_filter_rule:{
         strict:true,
         min_mbps:$speed_min_mbps,
@@ -690,6 +722,12 @@ jq -cn \
         failed_or_incomplete:"remove",
         retry:false
       },
+      country_exclusion_rule:{
+        strict:true,
+        excluded_country_codes:["RU","UA"],
+        excluded_countries:["Russia","Russian Federation","Ukraine"],
+        action:"remove_before_naming_and_publication"
+      },
       geo:{
         provider:"ipwho.is",
         endpoint:$geo_url,
@@ -698,8 +736,12 @@ jq -cn \
         timeout_seconds:$geo_timeout_seconds,
         elapsed_ms:$geo_elapsed,
         attempted:($after_speed|length),
-        success_complete:($final_survivors|length),
+        success_complete:($geo_complete_sorted|length),
         removed_geo_failed:$removed_geo_failed,
+        removed_country_excluded:$removed_country_excluded,
+        removed_country_ru:$removed_country_ru,
+        removed_country_ua:$removed_country_ua,
+        after_country_exclusion:($geo_allowed_sorted|length),
         final_count:($final_survivors|length)
       },
       naming:{
@@ -726,6 +768,7 @@ fi
 
 # ------------------------------------------------------------
 # Publish final subscriptions to Yandex Object Storage.
+# RU/UA exit nodes have already been removed before this point.
 #
 # subscription.yaml        = Mihomo profile
 # subscription.txt         = current raw/named URI list for Lxbox
