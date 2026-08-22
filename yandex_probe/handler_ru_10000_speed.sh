@@ -17,8 +17,8 @@ SPEED_CONCURRENCY=8
 SPEED_TIMEOUT_SECONDS=8
 SPEED_MIN_MBPS=5
 SPEED_URL_BASE="https://speed.cloudflare.com/__down"
-GEO_URL="https://ipwho.is/?fields=ip,success,country,country_code,city,flag"
-GEO_FALLBACK_URL="https://cloudflare.com/cdn-cgi/trace"
+GEO_URL="https://speed.cloudflare.com/meta"
+GEO_FALLBACK_URL="https://speed.cloudflare.com/__down?bytes=1"
 GEO_TIMEOUT_SECONDS=6
 
 rm -rf "$BASE_WORK"
@@ -363,6 +363,7 @@ if [[ "$ALIVE_COUNT" -gt 0 ]]; then
   fi
 
   FINAL_KEYS_FILE="$BASE_WORK/final_keys.json"
+  GEO_JOBS_FILE="$BASE_WORK/geo_jobs.json"
   GEO_RESULTS_FILE="$BASE_WORK/geo_results.json"
 
   jq -cn \
@@ -380,22 +381,43 @@ if [[ "$ALIVE_COUNT" -gt 0 ]]; then
         | {key:$a.key}
       ]' >"$FINAL_KEYS_FILE"
 
+  jq -cn \
+    --argjson min_mbps "$SPEED_MIN_MBPS" \
+    --slurpfile alive "$ALIVE_ARRAY_FILE" \
+    --slurpfile speed "$SPEED_RESULTS_FILE" '
+    ($alive[0] // []) as $alive
+    | ($speed[0] // []) as $speed
+    | INDEX($speed[]; .key) as $idx
+    | [
+        $alive[]
+        | . as $a
+        | ($idx[$a.key] // {}) as $s
+        | select(($s.ok // false) == true and ($s.mbps // 0) >= $min_mbps)
+        | select(
+            (($s.ip // "") | length) == 0
+            or (($s.country_code // "") | length) == 0
+            or (($s.city // "") | length) == 0
+          )
+        | {key:$a.key}
+      ]' >"$GEO_JOBS_FILE"
+
   FINAL_COUNT_PRE_GEO="$(jq 'length' "$FINAL_KEYS_FILE")"
+  GEO_NEEDED_COUNT="$(jq 'length' "$GEO_JOBS_FILE")"
   printf '[]\n' >"$GEO_RESULTS_FILE"
 
-  if [[ "$FINAL_COUNT_PRE_GEO" -gt 0 ]]; then
+  if [[ "$GEO_NEEDED_COUNT" -gt 0 ]]; then
     GEO_WORKERS="$SPEED_WORKERS"
-    if [[ "$FINAL_COUNT_PRE_GEO" -lt "$GEO_WORKERS" ]]; then
-      GEO_WORKERS="$FINAL_COUNT_PRE_GEO"
+    if [[ "$GEO_NEEDED_COUNT" -lt "$GEO_WORKERS" ]]; then
+      GEO_WORKERS="$GEO_NEEDED_COUNT"
     fi
 
-    echo "Geo stage: final=$FINAL_COUNT_PRE_GEO workers=$GEO_WORKERS provider=ipwho.is" >&2
+    echo "Geo stage: speed_pass=$FINAL_COUNT_PRE_GEO need_meta=$GEO_NEEDED_COUNT workers=$GEO_WORKERS provider=cloudflare_speed" >&2
 
     GEO_START_MS="$(date +%s%3N)"
 
     "$SPEED_BIN" \
       --mode geo \
-      --jobs "$FINAL_KEYS_FILE" \
+      --jobs "$GEO_JOBS_FILE" \
       --url "$GEO_URL" \
       --fallback-url "$GEO_FALLBACK_URL" \
       --controller "http://127.0.0.1:9090" \
@@ -427,6 +449,8 @@ else
   SPEED_WORKERS=0
   GEO_WORKERS=0
   GEO_ELAPSED_MS=0
+  GEO_NEEDED_COUNT=0
+  FINAL_COUNT_PRE_GEO=0
   GEO_RESULTS_FILE="$BASE_WORK/geo_results.json"
   printf '[]\n' >"$GEO_RESULTS_FILE"
 fi
@@ -450,6 +474,8 @@ jq -cn \
   --argjson geo_elapsed "$GEO_ELAPSED_MS" \
   --argjson geo_concurrency "$GEO_WORKERS" \
   --argjson geo_timeout_seconds "$GEO_TIMEOUT_SECONDS" \
+  --argjson geo_needed_count "$GEO_NEEDED_COUNT" \
+  --argjson speed_pass_count "$FINAL_COUNT_PRE_GEO" \
   --slurpfile meta "$META" \
   --slurpfile manifest "$MANIFEST" \
   --slurpfile mapping "$MAPPING" \
@@ -508,25 +534,58 @@ jq -cn \
       $survivors
       | map(select(.speed_test_ok == true and (.speed_mbps // 0) >= $speed_min_mbps))
       | map(
-          . as $s
-          | ($geo_index[$s.key] // {}) as $g
-          | ($g.flag // "🌐") as $flag
-          | (if (($g.country // "")|length) > 0 then $g.country else "Unknown" end) as $country
-          | (if (($g.city // "")|length) > 0 then $g.city else "Unknown" end) as $city
-          | (if (($g.ip // "")|length) > 0 then $g.ip else "Unknown" end) as $exit_ip
-          | (($s.protocol // "unknown") | ascii_upcase) as $type
-          | ($flag + " " + $country + " " + $city + " | " + $type + " | " + $exit_ip) as $display_name
+          . as $base
+          | ($speed_index[$base.key] // {}) as $sp
+          | ($geo_index[$base.key] // {}) as $extra
           | (
-              (($s.uri // "") | split("#")[0])
-              + "#"
-              + ($display_name | @uri)
+              if (
+                (($sp.ip // "")|length) > 0
+                and (($sp.country_code // "")|length) > 0
+                and (($sp.city // "")|length) > 0
+              )
+              then $sp
+              else $extra
+              end
+            ) as $g
+          | (($base.protocol // "unknown") | ascii_upcase) as $type
+          | ($g.flag // "🌐") as $flag
+          | ($g.country // "") as $country
+          | ($g.country_code // "") as $country_code
+          | ($g.city // "") as $city
+          | ($g.ip // "") as $exit_ip
+          | (
+              ($g.ok // false) == true
+              or (
+                (($sp.ip // "")|length) > 0
+                and (($sp.country_code // "")|length) > 0
+                and (($sp.city // "")|length) > 0
+              )
+            ) as $geo_ok
+          | (
+              if $geo_ok
+                 and ($exit_ip|length) > 0
+                 and ($country_code|length) > 0
+                 and ($city|length) > 0
+              then ($flag + " " + $country + " " + $city + " | " + $type + " | " + $exit_ip)
+              else null
+              end
+            ) as $display_name
+          | (
+              if $display_name != null
+              then (
+                (($base.uri // "") | split("#")[0])
+                + "#"
+                + ($display_name | @uri)
+              )
+              else null
+              end
             ) as $named_uri
-          | . + {
-              geo_ok:($g.ok // false),
-              exit_ip:$exit_ip,
-              country:$country,
-              country_code:($g.country_code // null),
-              city:$city,
+          | $base + {
+              geo_ok:$geo_ok,
+              exit_ip:(if ($exit_ip|length)>0 then $exit_ip else null end),
+              country:(if ($country|length)>0 then $country else null end),
+              country_code:(if ($country_code|length)>0 then $country_code else null end),
+              city:(if ($city|length)>0 then $city else null end),
               flag:$flag,
               geo_source:($g.source // null),
               geo_error:($g.error // null),
@@ -534,17 +593,29 @@ jq -cn \
               named_uri:$named_uri
             }
         )
+    ) as $after_speed_with_geo
+  | (
+      $after_speed_with_geo
+      | map(select(
+          .geo_ok == true
+          and ((.exit_ip // "")|length) > 0
+          and ((.country_code // "")|length) > 0
+          and ((.city // "")|length) > 0
+          and ((.named_uri // "")|length) > 0
+        ))
       | sort_by(.ru_delay_ms)
     ) as $final_survivors
+  | (($after_speed_with_geo|length) - ($final_survivors|length)) as $removed_geo_failed
+  | ([$after_speed_with_geo[] | select(.geo_source == "cloudflare_speed_headers")] | length) as $geo_reused_headers
   | ([$survivors[] | select(.speed_test_ok != true)] | length) as $removed_speed_failed
   | ([$survivors[] | select(.speed_test_ok == true and (.speed_mbps // 0) < $speed_min_mbps)] | length) as $removed_below_threshold
   | {
       ok:true,
       mihomo_version:$version,
       location:"yandex_ru",
-      stage:"ru_mihomo_speed_geo_naming",
+      stage:"ru_mihomo_speed_cloudflare_geo_strict_naming",
       ranking_rule:"strict speed gate first, then ranking only by RU latency",
-      strategy:"RU delay -> strict speed gate -> exit-IP geolocation -> naming",
+      strategy:"RU delay -> strict speed gate -> Cloudflare Speed geo -> strict geo gate -> naming",
       speed_filter_rule:{
         strict:true,
         min_mbps:$speed_min_mbps,
@@ -605,19 +676,30 @@ jq -cn \
         ru_alive:($survivors|length),
         removed_speed_failed:$removed_speed_failed,
         removed_below_5_mbps:$removed_below_threshold,
-        final_count:($final_survivors|length)
+        after_speed_count:$speed_pass_count
+      },
+      geo_filter_rule:{
+        strict:true,
+        require_exit_ip:true,
+        require_country:true,
+        require_city:true,
+        failed_or_incomplete:"remove",
+        retry:false
       },
       geo:{
-        provider:"ipwho.is",
+        provider:"cloudflare_speed",
         endpoint:$geo_url,
-        fallback:"cloudflare_cdn_cgi_trace",
+        fallback:"cloudflare_speed_download_headers",
         concurrency:$geo_concurrency,
         timeout_seconds:$geo_timeout_seconds,
         elapsed_ms:$geo_elapsed,
-        attempted:($final_survivors|length),
-        success:([$final_survivors[] | select(.geo_ok == true)]|length),
-        failed:([$final_survivors[] | select(.geo_ok != true)]|length),
-        fallback_used:([$final_survivors[] | select(.geo_source == "cloudflare_trace_fallback")]|length)
+        speed_pass_count:$speed_pass_count,
+        reused_from_speed_headers:$geo_reused_headers,
+        meta_requests:$geo_needed_count,
+        success_final:($final_survivors|length),
+        removed_geo_failed:$removed_geo_failed,
+        final_count:($final_survivors|length),
+        fallback_used:([$after_speed_with_geo[] | select(.geo_source == "cloudflare_speed_header_fallback")]|length)
       },
       naming_format:"FLAG Country City | TYPE | EXIT_IP",
       final_fastest_20:($final_survivors[0:20]),
