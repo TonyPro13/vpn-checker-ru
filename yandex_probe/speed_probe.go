@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
@@ -17,8 +18,7 @@ import (
 )
 
 type Job struct {
-	Key  string `json:"key"`
-	Port int    `json:"port"`
+	Key string `json:"key"`
 }
 
 type Result struct {
@@ -33,10 +33,45 @@ type Result struct {
 	Error      string  `json:"error,omitempty"`
 }
 
-func runJob(parent context.Context, job Job, target string, expectedBytes int64, timeout time.Duration) Result {
+type Worker struct {
+	ID        int
+	GroupName string
+	Port      int
+}
+
+func selectProxy(controller, group, proxyName string, timeout time.Duration) error {
+	body, _ := json.Marshal(map[string]string{"name": proxyName})
+
+	req, err := http.NewRequest(
+		http.MethodPut,
+		controller+"/proxies/"+url.PathEscape(group),
+		bytes.NewReader(body),
+	)
+	if err != nil {
+		return err
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: timeout}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent && (resp.StatusCode < 200 || resp.StatusCode >= 300) {
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("selector_http_%d: %s", resp.StatusCode, string(data))
+	}
+
+	return nil
+}
+
+func runDownload(parent context.Context, worker Worker, job Job, target string, expectedBytes int64, timeout time.Duration) Result {
 	res := Result{Key: job.Key}
 
-	proxyURL, err := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", job.Port))
+	proxyURL, err := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", worker.Port))
 	if err != nil {
 		res.Error = err.Error()
 		return res
@@ -77,7 +112,7 @@ func runJob(parent context.Context, job Job, target string, expectedBytes int64,
 		res.Error = err.Error()
 		return res
 	}
-	req.Header.Set("User-Agent", "vpn-checker-ru-speed-probe/1.0")
+	req.Header.Set("User-Agent", "vpn-checker-ru-speed-probe/2.0")
 	req.Header.Set("Cache-Control", "no-cache")
 
 	start := time.Now()
@@ -126,10 +161,13 @@ func runJob(parent context.Context, job Job, target string, expectedBytes int64,
 }
 
 func main() {
-	jobsPath := flag.String("jobs", "", "JSON file with [{key,port}]")
+	jobsPath := flag.String("jobs", "", "JSON file with [{key}]")
 	target := flag.String("url", "", "download URL")
+	controller := flag.String("controller", "http://127.0.0.1:9090", "Mihomo controller URL")
+	groupPrefix := flag.String("group-prefix", "SPEED-", "selector group prefix")
+	basePort := flag.Int("base-port", 20000, "first mixed listener port")
 	expectedBytes := flag.Int64("bytes", 524288, "expected download bytes")
-	concurrency := flag.Int("concurrency", 8, "parallel requests")
+	concurrency := flag.Int("concurrency", 8, "parallel workers/selectors")
 	timeout := flag.Duration("timeout", 8*time.Second, "per-request timeout")
 	flag.Parse()
 
@@ -148,11 +186,21 @@ func main() {
 		panic(err)
 	}
 
+	if len(jobs) == 0 {
+		enc := json.NewEncoder(os.Stdout)
+		_ = enc.Encode([]Result{})
+		return
+	}
+
 	if *concurrency < 1 {
 		*concurrency = 1
 	}
+	if *concurrency > len(jobs) {
+		*concurrency = len(jobs)
+	}
 
 	results := make([]Result, len(jobs))
+
 	type indexedJob struct {
 		Index int
 		Job   Job
@@ -164,23 +212,50 @@ func main() {
 
 	for w := 0; w < *concurrency; w++ {
 		wg.Add(1)
-		go func() {
+
+		worker := Worker{
+			ID:        w + 1,
+			GroupName: fmt.Sprintf("%s%d", *groupPrefix, w+1),
+			Port:      *basePort + w,
+		}
+
+		go func(worker Worker) {
 			defer wg.Done()
+
 			for item := range queue {
-				results[item.Index] = runJob(
+				if err := selectProxy(
+					*controller,
+					worker.GroupName,
+					item.Job.Key,
+					3*time.Second,
+				); err != nil {
+					results[item.Index] = Result{
+						Key:   item.Job.Key,
+						Error: "selector_switch_failed: " + err.Error(),
+					}
+					continue
+				}
+
+				// Tiny guard so the selector change is fully visible before opening
+				// the connection through this worker's inbound.
+				time.Sleep(20 * time.Millisecond)
+
+				results[item.Index] = runDownload(
 					ctx,
+					worker,
 					item.Job,
 					*target,
 					*expectedBytes,
 					*timeout,
 				)
 			}
-		}()
+		}(worker)
 	}
 
 	for i, job := range jobs {
 		queue <- indexedJob{Index: i, Job: job}
 	}
+
 	close(queue)
 	wg.Wait()
 

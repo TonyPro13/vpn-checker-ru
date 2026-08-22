@@ -226,6 +226,11 @@ SPEED_RESULTS_FILE="$BASE_WORK/speed_results.json"
 printf '[]\n' >"$SPEED_RESULTS_FILE"
 
 if [[ "$ALIVE_COUNT" -gt 0 ]]; then
+  SPEED_WORKERS="$SPEED_CONCURRENCY"
+  if [[ "$ALIVE_COUNT" -lt "$SPEED_WORKERS" ]]; then
+    SPEED_WORKERS="$ALIVE_COUNT"
+  fi
+
   SPEED_CONFIG="$BASE_WORK/speed_config.yaml"
   SPEED_JOBS="$BASE_WORK/speed_jobs.json"
   SPEED_WORK="$BASE_WORK/speed_runtime"
@@ -233,29 +238,40 @@ if [[ "$ALIVE_COUNT" -gt 0 ]]; then
   mkdir -p "$SPEED_WORK"
 
   jq -cn \
+    --argjson workers "$SPEED_WORKERS" \
     --slurpfile alive "$ALIVE_ARRAY_FILE" \
     --slurpfile defs "$PROXY_DEFS" '
     ($alive[0] // []) as $alive
     | ($defs[0] // {}) as $defs
+    | ($alive | map(.key)) as $names
     | {
         "allow-lan": false,
         "mode": "rule",
         "log-level": "warning",
         "ipv6": false,
+        "external-controller": "127.0.0.1:9090",
         "proxies": [
           $alive[]
           | $defs[.key]
           | select(. != null)
         ],
+        "proxy-groups": [
+          range(0; $workers) as $i
+          | {
+              name:("SPEED-" + (($i+1)|tostring)),
+              type:"select",
+              proxies:$names
+            }
+        ],
         "listeners": [
-          range(0; ($alive|length)) as $i
+          range(0; $workers) as $i
           | {
               name:("speed-in-" + (($i+1)|tostring)),
               type:"mixed",
               listen:"127.0.0.1",
               port:(20000 + $i),
               udp:false,
-              proxy:$alive[$i].key
+              proxy:("SPEED-" + (($i+1)|tostring))
             }
         ],
         "rules":["MATCH,DIRECT"]
@@ -263,22 +279,26 @@ if [[ "$ALIVE_COUNT" -gt 0 ]]; then
 
   jq -cn \
     --slurpfile alive "$ALIVE_ARRAY_FILE" '
-    ($alive[0] // []) as $alive
-    | [
-        range(0; ($alive|length)) as $i
-        | {
-            key:$alive[$i].key,
-            port:(20000 + $i)
-          }
-      ]' >"$SPEED_JOBS"
+    ($alive[0] // [])
+    | map({key:.key})' >"$SPEED_JOBS"
 
-  echo "Speed stage: alive=$ALIVE_COUNT listeners=$(jq '.listeners|length' "$SPEED_CONFIG") concurrency=$SPEED_CONCURRENCY bytes_each=$SPEED_BYTES" >&2
+  echo "Speed stage v2: alive=$ALIVE_COUNT workers=$SPEED_WORKERS bytes_each=$SPEED_BYTES" >&2
 
-  if ! "$MIHOMO_BIN" -t -f "$SPEED_CONFIG" >"$BASE_WORK/speed_validate.stdout.log" 2>"$BASE_WORK/speed_validate.stderr.log"; then
-    STDERR_LOG="$(tail -c 12000 "$BASE_WORK/speed_validate.stderr.log" 2>/dev/null || true)"
+  set +e
+  "$MIHOMO_BIN" -t -f "$SPEED_CONFIG" \
+    >"$BASE_WORK/speed_validate.stdout.log" \
+    2>"$BASE_WORK/speed_validate.stderr.log"
+  SPEED_VALIDATE_STATUS=$?
+  set -e
+
+  if [[ "$SPEED_VALIDATE_STATUS" -ne 0 ]]; then
+    VALIDATE_STDOUT="$(tail -c 12000 "$BASE_WORK/speed_validate.stdout.log" 2>/dev/null || true)"
+    VALIDATE_STDERR="$(tail -c 12000 "$BASE_WORK/speed_validate.stderr.log" 2>/dev/null || true)"
     BODY="$(jq -cn \
-      --arg stderr "$STDERR_LOG" \
-      '{ok:false,error:"speed_config_validation_failed",stderr:$stderr}')"
+      --argjson exit_status "$SPEED_VALIDATE_STATUS" \
+      --arg stdout "$VALIDATE_STDOUT" \
+      --arg stderr "$VALIDATE_STDERR" \
+      '{ok:false,error:"speed_config_validation_failed",exit_status:$exit_status,stdout:$stdout,stderr:$stderr}')"
     respond_json 500 "$BODY"
   fi
 
@@ -291,7 +311,8 @@ if [[ "$ALIVE_COUNT" -gt 0 ]]; then
 
   SPEED_READY=0
   for _ in $(seq 1 150); do
-    if (echo >/dev/tcp/127.0.0.1/20000) >/dev/null 2>&1; then
+    if (echo >/dev/tcp/127.0.0.1/9090) >/dev/null 2>&1 && \
+       (echo >/dev/tcp/127.0.0.1/20000) >/dev/null 2>&1; then
       SPEED_READY=1
       break
     fi
@@ -302,22 +323,26 @@ if [[ "$ALIVE_COUNT" -gt 0 ]]; then
   done
 
   if [[ "$SPEED_READY" != "1" ]]; then
+    STDOUT_LOG="$(tail -c 12000 "$BASE_WORK/speed_mihomo.stdout.log" 2>/dev/null || true)"
     STDERR_LOG="$(tail -c 12000 "$BASE_WORK/speed_mihomo.stderr.log" 2>/dev/null || true)"
     BODY="$(jq -cn \
+      --arg stdout "$STDOUT_LOG" \
       --arg stderr "$STDERR_LOG" \
-      '{ok:false,error:"speed_mihomo_not_ready",stderr:$stderr}')"
+      '{ok:false,error:"speed_mihomo_not_ready",stdout:$stdout,stderr:$stderr}')"
     respond_json 500 "$BODY"
   fi
 
   SPEED_START_MS="$(date +%s%3N)"
-
   SPEED_URL="${SPEED_URL_BASE}?bytes=${SPEED_BYTES}&measId=${REQUEST_ID:-manual}"
 
   "$SPEED_BIN" \
     --jobs "$SPEED_JOBS" \
     --url "$SPEED_URL" \
+    --controller "http://127.0.0.1:9090" \
+    --group-prefix "SPEED-" \
+    --base-port 20000 \
     --bytes "$SPEED_BYTES" \
-    --concurrency "$SPEED_CONCURRENCY" \
+    --concurrency "$SPEED_WORKERS" \
     --timeout "${SPEED_TIMEOUT_SECONDS}s" \
     >"$SPEED_RESULTS_FILE"
 
@@ -335,6 +360,7 @@ if [[ "$ALIVE_COUNT" -gt 0 ]]; then
   fi
 else
   SPEED_ELAPSED_MS=0
+  SPEED_WORKERS=0
 fi
 
 FUNCTION_END_MS="$(date +%s%3N)"
@@ -349,7 +375,7 @@ jq -cn \
   --argjson ru_filter_elapsed "$RU_FILTER_ELAPSED_MS" \
   --argjson speed_elapsed "$SPEED_ELAPSED_MS" \
   --argjson speed_bytes "$SPEED_BYTES" \
-  --argjson speed_concurrency "$SPEED_CONCURRENCY" \
+  --argjson speed_concurrency "$SPEED_WORKERS" \
   --argjson speed_timeout_seconds "$SPEED_TIMEOUT_SECONDS" \
   --slurpfile meta "$META" \
   --slurpfile manifest "$MANIFEST" \
@@ -408,7 +434,7 @@ jq -cn \
       location:"yandex_ru",
       stage:"ru_mihomo_plus_speed_measurement",
       ranking_rule:"speed is measurement only; no speed threshold applied in this run",
-      strategy:"RU delay batches of 1000, then immediate speed measurement on RU-alive",
+      strategy:"RU delay batches of 1000, then immediate speed measurement via 8 selector workers",
       function_elapsed_ms:$function_elapsed,
       ru_filter_elapsed_ms:$ru_filter_elapsed,
       requested:($meta.requested // null),
