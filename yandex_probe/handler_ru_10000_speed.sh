@@ -22,8 +22,10 @@ GEO_FALLBACK_URL=""
 GEO_TIMEOUT_SECONDS=6
 
 SUBSCRIPTION_BUCKET="${SUBSCRIPTION_BUCKET:-tony-vpn-subscription-2026}"
-SUBSCRIPTION_OBJECT="${SUBSCRIPTION_OBJECT:-subscription.txt}"
-SUBSCRIPTION_URL="https://storage.yandexcloud.net/${SUBSCRIPTION_BUCKET}/${SUBSCRIPTION_OBJECT}"
+SUBSCRIPTION_TXT_OBJECT="${SUBSCRIPTION_TXT_OBJECT:-subscription.txt}"
+SUBSCRIPTION_YAML_OBJECT="${SUBSCRIPTION_YAML_OBJECT:-subscription.yaml}"
+SUBSCRIPTION_TXT_URL="https://storage.yandexcloud.net/${SUBSCRIPTION_BUCKET}/${SUBSCRIPTION_TXT_OBJECT}"
+SUBSCRIPTION_YAML_URL="https://storage.yandexcloud.net/${SUBSCRIPTION_BUCKET}/${SUBSCRIPTION_YAML_OBJECT}"
 IAM_METADATA_URL="http://169.254.169.254/computeMetadata/v1/instance/service-accounts/default/token"
 
 rm -rf "$BASE_WORK"
@@ -721,9 +723,16 @@ if [[ "$SUMMARY_STATUS" -ne 0 || ! -s "$SUMMARY_FILE" ]]; then
 fi
 
 # ------------------------------------------------------------
-# Publish the final subscription to Yandex Object Storage.
-# Safety rule: never replace the last-known-good subscription
-# with an empty or failed build.
+# Publish final subscriptions to Yandex Object Storage.
+#
+# subscription.yaml = primary Mihomo/Clash profile
+# subscription.txt  = raw URI list for compatible clients
+#
+# Safety:
+# - never publish an empty result;
+# - build YAML from the exact Mihomo-validated proxy definitions;
+# - validate the final YAML with Mihomo itself before upload;
+# - verify both public objects byte-for-byte after upload.
 # ------------------------------------------------------------
 
 FINAL_COUNT="$(jq -r '.geo.final_count // 0' "$SUMMARY_FILE")"
@@ -732,8 +741,7 @@ NAMING_FAILED="$(jq -r '.naming.naming_failed // 0' "$SUMMARY_FILE")"
 if [[ "$FINAL_COUNT" -le 0 ]]; then
   BODY="$(jq -cn \
     --arg bucket "$SUBSCRIPTION_BUCKET" \
-    --arg object "$SUBSCRIPTION_OBJECT" \
-    '{ok:false,error:"publication_skipped_empty_subscription",bucket:$bucket,object:$object,last_good_subscription_preserved:true}')"
+    '{ok:false,error:"publication_skipped_empty_subscription",bucket:$bucket,last_good_subscription_preserved:true}')"
   respond_json 500 "$BODY"
 fi
 
@@ -744,41 +752,159 @@ if [[ "$NAMING_FAILED" -ne 0 ]]; then
   respond_json 500 "$BODY"
 fi
 
-SUBSCRIPTION_FILE="$BASE_WORK/subscription.txt"
-jq -r '.subscription_text // empty' "$SUMMARY_FILE" >"$SUBSCRIPTION_FILE"
+TXT_FILE="$BASE_WORK/subscription.txt"
+YAML_FILE="$BASE_WORK/subscription.yaml"
 
-if [[ ! -s "$SUBSCRIPTION_FILE" ]]; then
-  BODY='{"ok":false,"error":"publication_subscription_file_empty","last_good_subscription_preserved":true}'
+jq -r '.subscription_text // empty' "$SUMMARY_FILE" >"$TXT_FILE"
+
+if [[ ! -s "$TXT_FILE" ]]; then
+  BODY='{"ok":false,"error":"publication_txt_empty","last_good_subscription_preserved":true}'
   respond_json 500 "$BODY"
 fi
 
-# Ensure there is exactly one trailing newline.
-python3 - "$SUBSCRIPTION_FILE" <<'PY'
+# Exactly one trailing newline for raw URI subscription.
+python3 - "$TXT_FILE" <<'PY'
 from pathlib import Path
 import sys
 
 p = Path(sys.argv[1])
-data = p.read_bytes().rstrip(b"\r\n") + b"\n"
-p.write_bytes(data)
+p.write_bytes(p.read_bytes().rstrip(b"\r\n") + b"\n")
 PY
 NORMALIZE_STATUS=$?
 
-if [[ "$NORMALIZE_STATUS" -ne 0 || ! -s "$SUBSCRIPTION_FILE" ]]; then
+if [[ "$NORMALIZE_STATUS" -ne 0 || ! -s "$TXT_FILE" ]]; then
   BODY="$(jq -cn \
     --argjson exit_status "$NORMALIZE_STATUS" \
-    '{ok:false,error:"publication_subscription_normalize_failed",exit_status:$exit_status,last_good_subscription_preserved:true}')"
+    '{ok:false,error:"publication_txt_normalize_failed",exit_status:$exit_status,last_good_subscription_preserved:true}')"
   respond_json 500 "$BODY"
 fi
 
-SUBSCRIPTION_LINES="$(grep -cve '^[[:space:]]*$' "$SUBSCRIPTION_FILE" || true)"
-if [[ "$SUBSCRIPTION_LINES" -ne "$FINAL_COUNT" ]]; then
+TXT_LINES="$(grep -cve '^[[:space:]]*$' "$TXT_FILE" || true)"
+if [[ "$TXT_LINES" -ne "$FINAL_COUNT" ]]; then
   BODY="$(jq -cn \
     --argjson expected "$FINAL_COUNT" \
-    --argjson actual "$SUBSCRIPTION_LINES" \
-    '{ok:false,error:"publication_line_count_mismatch",expected:$expected,actual:$actual,last_good_subscription_preserved:true}')"
+    --argjson actual "$TXT_LINES" \
+    '{ok:false,error:"publication_txt_line_count_mismatch",expected:$expected,actual:$actual,last_good_subscription_preserved:true}')"
   respond_json 500 "$BODY"
 fi
 
+# Build a real Mihomo YAML profile from the exact sanitized proxy
+# definitions that were already accepted by Mihomo during the build.
+# Flow-style JSON mappings are valid YAML and preserve nested proxy fields.
+python3 - "$SUMMARY_FILE" "$PROXY_DEFS" "$YAML_FILE" <<'PY'
+import copy
+import json
+import sys
+from pathlib import Path
+
+summary_path = Path(sys.argv[1])
+defs_path = Path(sys.argv[2])
+out_path = Path(sys.argv[3])
+
+summary = json.loads(summary_path.read_text(encoding="utf-8"))
+proxy_defs = json.loads(defs_path.read_text(encoding="utf-8"))
+survivors = summary.get("final_survivors") or []
+
+if not survivors:
+    raise SystemExit("no final survivors")
+
+proxies = []
+names = []
+
+for item in survivors:
+    key = item.get("key")
+    display_name = item.get("display_name")
+    if not key or not display_name:
+        raise SystemExit(f"missing key/display_name: {key!r}")
+
+    original = proxy_defs.get(key)
+    if not isinstance(original, dict):
+        raise SystemExit(f"proxy definition missing for {key}")
+
+    proxy = copy.deepcopy(original)
+    proxy["name"] = display_name
+    proxies.append(proxy)
+    names.append(display_name)
+
+if len(names) != len(set(names)):
+    raise SystemExit("duplicate final proxy names")
+
+# A complete Mihomo profile:
+# AUTO measures from the actual client device and automatically chooses
+# the lowest-latency currently working proxy. VPN defaults to AUTO but
+# still allows manual selection in clients that expose the group.
+auto_group = {
+    "name": "AUTO",
+    "type": "url-test",
+    "proxies": names,
+    "url": "https://cp.cloudflare.com",
+    "interval": 300,
+    "tolerance": 50,
+    "lazy": True,
+}
+vpn_group = {
+    "name": "VPN",
+    "type": "select",
+    "proxies": ["AUTO"] + names,
+}
+
+with out_path.open("w", encoding="utf-8", newline="\n") as f:
+    f.write("# Auto-generated by vpn-checker-ru\n")
+    f.write("# Do not edit manually: this file is replaced on every successful refresh.\n")
+    f.write("mode: rule\n")
+    f.write("log-level: warning\n")
+    f.write("ipv6: true\n")
+    f.write("unified-delay: true\n")
+    f.write("tcp-concurrent: true\n")
+    f.write("\nproxies:\n")
+    for proxy in proxies:
+        f.write("  - ")
+        f.write(json.dumps(proxy, ensure_ascii=False, separators=(",", ":")))
+        f.write("\n")
+
+    f.write("\nproxy-groups:\n")
+    for group in (auto_group, vpn_group):
+        f.write("  - ")
+        f.write(json.dumps(group, ensure_ascii=False, separators=(",", ":")))
+        f.write("\n")
+
+    f.write("\nrules:\n")
+    f.write("  - MATCH,VPN\n")
+PY
+YAML_BUILD_STATUS=$?
+
+if [[ "$YAML_BUILD_STATUS" -ne 0 || ! -s "$YAML_FILE" ]]; then
+  BODY="$(jq -cn \
+    --argjson exit_status "$YAML_BUILD_STATUS" \
+    '{ok:false,error:"publication_yaml_build_failed",exit_status:$exit_status,last_good_subscription_preserved:true}')"
+  respond_json 500 "$BODY"
+fi
+
+# Validate exactly what users will download.
+YAML_VALIDATE_DIR="$BASE_WORK/yaml_validate"
+mkdir -p "$YAML_VALIDATE_DIR"
+YAML_VALIDATE_OUT="$BASE_WORK/yaml_validate.stdout.log"
+YAML_VALIDATE_ERR="$BASE_WORK/yaml_validate.stderr.log"
+
+"$MIHOMO_BIN" -t -d "$YAML_VALIDATE_DIR" -f "$YAML_FILE" \
+  >"$YAML_VALIDATE_OUT" 2>"$YAML_VALIDATE_ERR"
+YAML_VALIDATE_STATUS=$?
+
+if [[ "$YAML_VALIDATE_STATUS" -ne 0 ]]; then
+  VALIDATION_DETAIL="$(
+    {
+      cat "$YAML_VALIDATE_OUT" 2>/dev/null || true
+      cat "$YAML_VALIDATE_ERR" 2>/dev/null || true
+    } | tail -c 6000
+  )"
+  BODY="$(jq -cn \
+    --argjson exit_status "$YAML_VALIDATE_STATUS" \
+    --arg detail "$VALIDATION_DETAIL" \
+    '{ok:false,error:"publication_yaml_mihomo_validation_failed",exit_status:$exit_status,detail:$detail,last_good_subscription_preserved:true}')"
+  respond_json 500 "$BODY"
+fi
+
+# Get one short-lived IAM token for both uploads.
 TOKEN_STDERR="$BASE_WORK/iam_token.stderr.log"
 TOKEN_JSON="$(
   curl -fsS \
@@ -805,102 +931,147 @@ if [[ -z "$IAM_TOKEN" ]]; then
   respond_json 500 "$BODY"
 fi
 
-UPLOAD_RESPONSE="$BASE_WORK/storage_put_response.txt"
-UPLOAD_STDERR="$BASE_WORK/storage_put.stderr.log"
+publish_and_verify() {
+  local src_file="$1"
+  local public_url="$2"
+  local content_type="$3"
+  local label="$4"
 
-UPLOAD_HTTP="$(
-  curl -sS \
-    --connect-timeout 5 \
-    --max-time 30 \
-    --request PUT \
-    --header "Authorization: Bearer ${IAM_TOKEN}" \
-    --header "Content-Type: text/plain; charset=utf-8" \
-    --header "Cache-Control: no-cache, max-age=0, must-revalidate" \
-    --upload-file "$SUBSCRIPTION_FILE" \
-    --output "$UPLOAD_RESPONSE" \
-    --write-out '%{http_code}' \
-    "$SUBSCRIPTION_URL" \
-    2>"$UPLOAD_STDERR"
-)"
-UPLOAD_STATUS=$?
+  local upload_response="$BASE_WORK/${label}.put.response"
+  local upload_stderr="$BASE_WORK/${label}.put.stderr"
+  local upload_http
+  local upload_status
 
-# Forget the token as soon as the authenticated request is complete.
+  upload_http="$(
+    curl -sS \
+      --connect-timeout 5 \
+      --max-time 30 \
+      --request PUT \
+      --header "Authorization: Bearer ${IAM_TOKEN}" \
+      --header "Content-Type: ${content_type}" \
+      --header "Cache-Control: no-cache, max-age=0, must-revalidate" \
+      --upload-file "$src_file" \
+      --output "$upload_response" \
+      --write-out '%{http_code}' \
+      "$public_url" \
+      2>"$upload_stderr"
+  )"
+  upload_status=$?
+
+  if [[ "$upload_status" -ne 0 || "$upload_http" != "200" ]]; then
+    local detail response
+    detail="$(tail -c 4000 "$upload_stderr" 2>/dev/null || true)"
+    response="$(tail -c 4000 "$upload_response" 2>/dev/null || true)"
+    BODY="$(jq -cn \
+      --arg label "$label" \
+      --argjson exit_status "$upload_status" \
+      --arg http_status "$upload_http" \
+      --arg detail "$detail" \
+      --arg response "$response" \
+      --arg url "$public_url" \
+      '{ok:false,error:"publication_object_storage_put_failed",label:$label,exit_status:$exit_status,http_status:$http_status,detail:$detail,response:$response,url:$url}')"
+    respond_json 500 "$BODY"
+  fi
+
+  local verify_file="$BASE_WORK/${label}.public.verify"
+  local verify_stderr="$BASE_WORK/${label}.verify.stderr"
+  local verify_http
+  local verify_status
+
+  verify_http="$(
+    curl -sS \
+      --connect-timeout 5 \
+      --max-time 30 \
+      --header "Cache-Control: no-cache" \
+      --output "$verify_file" \
+      --write-out '%{http_code}' \
+      "${public_url}?verify=$(date +%s%N)" \
+      2>"$verify_stderr"
+  )"
+  verify_status=$?
+
+  if [[ "$verify_status" -ne 0 || "$verify_http" != "200" ]]; then
+    local detail
+    detail="$(tail -c 4000 "$verify_stderr" 2>/dev/null || true)"
+    BODY="$(jq -cn \
+      --arg label "$label" \
+      --argjson exit_status "$verify_status" \
+      --arg http_status "$verify_http" \
+      --arg detail "$detail" \
+      --arg url "$public_url" \
+      '{ok:false,error:"publication_public_read_verification_failed",label:$label,exit_status:$exit_status,http_status:$http_status,detail:$detail,url:$url,object_was_uploaded:true}')"
+    respond_json 500 "$BODY"
+  fi
+
+  if ! cmp -s "$src_file" "$verify_file"; then
+    BODY="$(jq -cn \
+      --arg label "$label" \
+      --arg url "$public_url" \
+      '{ok:false,error:"publication_public_content_mismatch",label:$label,url:$url,object_was_uploaded:true}')"
+    respond_json 500 "$BODY"
+  fi
+}
+
+# Mihomo YAML is primary. Raw TXT is retained for other compatible clients.
+publish_and_verify \
+  "$YAML_FILE" \
+  "$SUBSCRIPTION_YAML_URL" \
+  "application/yaml; charset=utf-8" \
+  "yaml"
+
+publish_and_verify \
+  "$TXT_FILE" \
+  "$SUBSCRIPTION_TXT_URL" \
+  "text/plain; charset=utf-8" \
+  "txt"
+
 unset IAM_TOKEN
 TOKEN_JSON=""
 
-if [[ "$UPLOAD_STATUS" -ne 0 || "$UPLOAD_HTTP" != "200" ]]; then
-  UPLOAD_ERROR="$(tail -c 4000 "$UPLOAD_STDERR" 2>/dev/null || true)"
-  UPLOAD_BODY="$(tail -c 4000 "$UPLOAD_RESPONSE" 2>/dev/null || true)"
-  BODY="$(jq -cn \
-    --argjson exit_status "$UPLOAD_STATUS" \
-    --arg http_status "$UPLOAD_HTTP" \
-    --arg detail "$UPLOAD_ERROR" \
-    --arg response "$UPLOAD_BODY" \
-    --arg url "$SUBSCRIPTION_URL" \
-    '{ok:false,error:"publication_object_storage_put_failed",exit_status:$exit_status,http_status:$http_status,detail:$detail,response:$response,url:$url,last_good_subscription_preserved:true}')"
-  respond_json 500 "$BODY"
-fi
-
-# Public read verification. This confirms both the bucket setting and
-# that clients will receive exactly the bytes we just published.
-VERIFY_FILE="$BASE_WORK/subscription.public.verify.txt"
-VERIFY_STDERR="$BASE_WORK/subscription.public.verify.stderr.log"
-
-VERIFY_HTTP="$(
-  curl -sS \
-    --connect-timeout 5 \
-    --max-time 30 \
-    --header "Cache-Control: no-cache" \
-    --output "$VERIFY_FILE" \
-    --write-out '%{http_code}' \
-    "${SUBSCRIPTION_URL}?verify=$(date +%s)" \
-    2>"$VERIFY_STDERR"
-)"
-VERIFY_STATUS=$?
-
-if [[ "$VERIFY_STATUS" -ne 0 || "$VERIFY_HTTP" != "200" ]]; then
-  VERIFY_ERROR="$(tail -c 4000 "$VERIFY_STDERR" 2>/dev/null || true)"
-  BODY="$(jq -cn \
-    --argjson exit_status "$VERIFY_STATUS" \
-    --arg http_status "$VERIFY_HTTP" \
-    --arg detail "$VERIFY_ERROR" \
-    --arg url "$SUBSCRIPTION_URL" \
-    '{ok:false,error:"publication_public_read_verification_failed",exit_status:$exit_status,http_status:$http_status,detail:$detail,url:$url,object_was_uploaded:true}')"
-  respond_json 500 "$BODY"
-fi
-
-if ! cmp -s "$SUBSCRIPTION_FILE" "$VERIFY_FILE"; then
-  BODY="$(jq -cn \
-    --arg url "$SUBSCRIPTION_URL" \
-    '{ok:false,error:"publication_public_content_mismatch",url:$url,object_was_uploaded:true}')"
-  respond_json 500 "$BODY"
-fi
-
-SUBSCRIPTION_BYTES="$(wc -c <"$SUBSCRIPTION_FILE" | tr -d ' ')"
-SUBSCRIPTION_SHA256="$(sha256sum "$SUBSCRIPTION_FILE" | awk '{print $1}')"
+YAML_BYTES="$(wc -c <"$YAML_FILE" | tr -d ' ')"
+YAML_SHA256="$(sha256sum "$YAML_FILE" | awk '{print $1}')"
+TXT_BYTES="$(wc -c <"$TXT_FILE" | tr -d ' ')"
+TXT_SHA256="$(sha256sum "$TXT_FILE" | awk '{print $1}')"
 PUBLISHED_AT="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
 
 SUMMARY_UPDATED="$BASE_WORK/summary.published.json"
 jq \
   --arg bucket "$SUBSCRIPTION_BUCKET" \
-  --arg object "$SUBSCRIPTION_OBJECT" \
-  --arg url "$SUBSCRIPTION_URL" \
+  --arg yaml_object "$SUBSCRIPTION_YAML_OBJECT" \
+  --arg yaml_url "$SUBSCRIPTION_YAML_URL" \
+  --arg yaml_sha256 "$YAML_SHA256" \
+  --arg txt_object "$SUBSCRIPTION_TXT_OBJECT" \
+  --arg txt_url "$SUBSCRIPTION_TXT_URL" \
+  --arg txt_sha256 "$TXT_SHA256" \
   --arg published_at "$PUBLISHED_AT" \
-  --arg sha256 "$SUBSCRIPTION_SHA256" \
-  --argjson bytes "$SUBSCRIPTION_BYTES" \
-  --argjson lines "$SUBSCRIPTION_LINES" \
+  --argjson final_count "$FINAL_COUNT" \
+  --argjson yaml_bytes "$YAML_BYTES" \
+  --argjson txt_bytes "$TXT_BYTES" \
   '. + {
     publication:{
       ok:true,
       bucket:$bucket,
-      object:$object,
-      url:$url,
       published_at_utc:$published_at,
-      http_status:200,
-      public_read_verified:true,
-      lines:$lines,
-      bytes:$bytes,
-      sha256:$sha256,
+      primary_format:"mihomo_yaml",
+      mihomo:{
+        object:$yaml_object,
+        url:$yaml_url,
+        http_status:200,
+        public_read_verified:true,
+        mihomo_validation:true,
+        proxies:$final_count,
+        bytes:$yaml_bytes,
+        sha256:$yaml_sha256
+      },
+      raw_uri:{
+        object:$txt_object,
+        url:$txt_url,
+        http_status:200,
+        public_read_verified:true,
+        lines:$final_count,
+        bytes:$txt_bytes,
+        sha256:$txt_sha256
+      },
       cache_control:"no-cache, max-age=0, must-revalidate"
     }
   }' \
@@ -910,13 +1081,14 @@ PUBLISH_SUMMARY_STATUS=$?
 if [[ "$PUBLISH_SUMMARY_STATUS" -ne 0 || ! -s "$SUMMARY_UPDATED" ]]; then
   BODY="$(jq -cn \
     --argjson exit_status "$PUBLISH_SUMMARY_STATUS" \
-    --arg url "$SUBSCRIPTION_URL" \
-    '{ok:false,error:"publication_summary_update_failed",exit_status:$exit_status,url:$url,object_was_uploaded:true}')"
+    --arg yaml_url "$SUBSCRIPTION_YAML_URL" \
+    '{ok:false,error:"publication_summary_update_failed",exit_status:$exit_status,yaml_url:$yaml_url,objects_were_uploaded:true}')"
   respond_json 500 "$BODY"
 fi
 
 mv "$SUMMARY_UPDATED" "$SUMMARY_FILE"
 
-echo "Published subscription: url=$SUBSCRIPTION_URL lines=$SUBSCRIPTION_LINES bytes=$SUBSCRIPTION_BYTES sha256=$SUBSCRIPTION_SHA256" >&2
+echo "Published Mihomo YAML: url=$SUBSCRIPTION_YAML_URL proxies=$FINAL_COUNT bytes=$YAML_BYTES sha256=$YAML_SHA256" >&2
+echo "Published raw URI TXT: url=$SUBSCRIPTION_TXT_URL lines=$FINAL_COUNT bytes=$TXT_BYTES sha256=$TXT_SHA256" >&2
 
 respond_file 200 "$SUMMARY_FILE"
