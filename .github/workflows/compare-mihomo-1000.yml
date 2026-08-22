@@ -30,6 +30,9 @@ jobs:
             --limit 1000 \
             --output-dir yandex_probe/generated_1000
 
+          echo "===== sample metadata ====="
+          cat yandex_probe/generated_1000/meta.json
+
       - name: Download latest stable Mihomo
         shell: bash
         run: |
@@ -51,6 +54,34 @@ jobs:
             echo "::error::Mihomo binary appears dynamically linked."
             ldd ./mihomo || true
             exit 1
+          fi
+
+      - name: Validate generated Mihomo config
+        shell: bash
+        run: |
+          set +e
+
+          echo "===== Mihomo config validation ====="
+          ./mihomo -t -f yandex_probe/generated_1000/config.yaml \
+            >mihomo-config-check.stdout.txt \
+            2>mihomo-config-check.stderr.txt
+
+          STATUS=$?
+
+          echo
+          echo "===== STDOUT ====="
+          cat mihomo-config-check.stdout.txt || true
+
+          echo
+          echo "===== STDERR ====="
+          cat mihomo-config-check.stderr.txt || true
+
+          echo
+          echo "===== EXIT STATUS: $STATUS ====="
+
+          if [ "$STATUS" -ne 0 ]; then
+            echo "::error::Generated Mihomo config is invalid. See STDERR above."
+            exit "$STATUS"
           fi
 
       - name: Run exact 1000-config Mihomo test on GitHub
