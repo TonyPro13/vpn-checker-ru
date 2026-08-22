@@ -15,6 +15,7 @@ PROXY_DEFS="$ROOT/proxy_defs.json"
 SPEED_BYTES=524288
 SPEED_CONCURRENCY=8
 SPEED_TIMEOUT_SECONDS=8
+SPEED_MIN_MBPS=5
 SPEED_URL_BASE="https://speed.cloudflare.com/__down"
 
 rm -rf "$BASE_WORK"
@@ -377,6 +378,7 @@ jq -cn \
   --argjson speed_bytes "$SPEED_BYTES" \
   --argjson speed_concurrency "$SPEED_WORKERS" \
   --argjson speed_timeout_seconds "$SPEED_TIMEOUT_SECONDS" \
+  --argjson speed_min_mbps "$SPEED_MIN_MBPS" \
   --slurpfile meta "$META" \
   --slurpfile manifest "$MANIFEST" \
   --slurpfile mapping "$MAPPING" \
@@ -428,13 +430,27 @@ jq -cn \
     ) as $survivors
   | ($survivors | map(.ru_delay_ms)) as $latency_vals
   | ($survivors | map(select(.speed_test_ok == true) | .speed_mbps) | sort) as $speed_vals
+  | (
+      $survivors
+      | map(select(.speed_test_ok == true and (.speed_mbps // 0) >= $speed_min_mbps))
+      | sort_by(.ru_delay_ms)
+    ) as $final_survivors
+  | ([$survivors[] | select(.speed_test_ok != true)] | length) as $removed_speed_failed
+  | ([$survivors[] | select(.speed_test_ok == true and (.speed_mbps // 0) < $speed_min_mbps)] | length) as $removed_below_threshold
   | {
       ok:true,
       mihomo_version:$version,
       location:"yandex_ru",
       stage:"ru_mihomo_plus_speed_measurement",
-      ranking_rule:"speed is measurement only; no speed threshold applied in this run",
-      strategy:"RU delay batches of 1000, then immediate speed measurement via 8 selector workers",
+      ranking_rule:"strict speed gate first, then ranking only by RU latency",
+      strategy:"RU delay batches of 1000, then immediate strict speed filter via selector workers",
+      speed_filter_rule:{
+        strict:true,
+        min_mbps:$speed_min_mbps,
+        failed_test:"remove",
+        below_threshold:"remove",
+        retry:false
+      },
       function_elapsed_ms:$function_elapsed,
       ru_filter_elapsed_ms:$ru_filter_elapsed,
       requested:($meta.requested // null),
@@ -484,9 +500,18 @@ jq -cn \
           gte_50:([$speed_vals[] | select(. >= 50)]|length)
         }
       },
-      fastest_latency_20:($survivors[0:20]),
+      strict_filter_result:{
+        ru_alive:($survivors|length),
+        removed_speed_failed:$removed_speed_failed,
+        removed_below_5_mbps:$removed_below_threshold,
+        final_count:($final_survivors|length)
+      },
+      fastest_latency_20_before_speed_filter:($survivors[0:20]),
+      final_fastest_20:($final_survivors[0:20]),
       chunks:$chunks,
-      survivors:$survivors
+      final_survivors:$final_survivors,
+      final_uris:($final_survivors | map(.uri)),
+      survivors_before_speed_filter:$survivors
     }' >"$SUMMARY_FILE"
 
 SUMMARY_STATUS=$?
