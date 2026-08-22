@@ -9,7 +9,7 @@ permissions:
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     steps:
       - name: Checkout
@@ -22,16 +22,6 @@ jobs:
 
       - name: Install build dependency
         run: python -m pip install --disable-pip-version-check PyYAML
-
-      - name: Build deterministic 1000-config sample
-        run: |
-          python yandex_probe/build_compare_batch.py \
-            --input output/unique.txt \
-            --limit 1000 \
-            --output-dir yandex_probe/generated_1000
-
-          echo "===== sample metadata ====="
-          cat yandex_probe/generated_1000/meta.json
 
       - name: Download latest stable Mihomo
         shell: bash
@@ -56,35 +46,39 @@ jobs:
             exit 1
           fi
 
-      - name: Validate generated Mihomo config
+      - name: Build deterministic 1000-config sample
+        run: |
+          python yandex_probe/build_compare_batch.py \
+            --input output/unique.txt \
+            --limit 1000 \
+            --output-dir yandex_probe/generated_1000
+
+          echo "===== sample metadata before Mihomo validation ====="
+          jq 'del(.sample_source_indexes)' yandex_probe/generated_1000/meta.json
+
+      - name: Remove configs rejected by Mihomo
+        run: |
+          python yandex_probe/sanitize_mihomo_config.py \
+            --mihomo ./mihomo \
+            --config yandex_probe/generated_1000/config.yaml \
+            --meta yandex_probe/generated_1000/meta.json \
+            --rejected yandex_probe/generated_1000/mihomo_rejected.json
+
+          echo
+          echo "===== sample metadata after Mihomo validation ====="
+          jq 'del(.sample_source_indexes)' yandex_probe/generated_1000/meta.json
+
+          echo
+          echo "===== rejected by Mihomo ====="
+          cat yandex_probe/generated_1000/mihomo_rejected.json
+
+      - name: Final validate exact Mihomo config
         shell: bash
         run: |
-          set +e
+          set -euo pipefail
+          ./mihomo -t -f yandex_probe/generated_1000/config.yaml
 
-          echo "===== Mihomo config validation ====="
-          ./mihomo -t -f yandex_probe/generated_1000/config.yaml \
-            >mihomo-config-check.stdout.txt \
-            2>mihomo-config-check.stderr.txt
-
-          STATUS=$?
-
-          echo
-          echo "===== STDOUT ====="
-          cat mihomo-config-check.stdout.txt || true
-
-          echo
-          echo "===== STDERR ====="
-          cat mihomo-config-check.stderr.txt || true
-
-          echo
-          echo "===== EXIT STATUS: $STATUS ====="
-
-          if [ "$STATUS" -ne 0 ]; then
-            echo "::error::Generated Mihomo config is invalid. See STDERR above."
-            exit "$STATUS"
-          fi
-
-      - name: Run exact 1000-config Mihomo test on GitHub
+      - name: Run exact sanitized Mihomo test on GitHub
         run: |
           python yandex_probe/run_mihomo_group_test.py \
             --mihomo ./mihomo \
@@ -93,7 +87,7 @@ jobs:
             --output github-mihomo-1000-result.json \
             --label github
 
-      - name: Build Yandex package from the SAME config
+      - name: Build Yandex package from the SAME sanitized config
         shell: bash
         run: |
           set -euo pipefail
@@ -116,7 +110,7 @@ jobs:
           jq 'del(.delays)' github-mihomo-1000-result.json
 
           echo
-          echo "===== Package ====="
+          echo "===== Yandex package ====="
           ls -lh yandex-mihomo-compare-1000.zip
 
       - name: Upload comparison artifact
@@ -127,5 +121,6 @@ jobs:
             yandex-mihomo-compare-1000.zip
             github-mihomo-1000-result.json
             yandex_probe/generated_1000/meta.json
+            yandex_probe/generated_1000/mihomo_rejected.json
           if-no-files-found: error
           retention-days: 7
