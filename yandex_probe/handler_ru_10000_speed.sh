@@ -21,6 +21,11 @@ GEO_URL="https://ipwho.is/?fields=ip,success,country,country_code,city,flag"
 GEO_FALLBACK_URL=""
 GEO_TIMEOUT_SECONDS=6
 
+SUBSCRIPTION_BUCKET="${SUBSCRIPTION_BUCKET:-tony-vpn-subscription-2026}"
+SUBSCRIPTION_OBJECT="${SUBSCRIPTION_OBJECT:-subscription.txt}"
+SUBSCRIPTION_URL="https://storage.yandexcloud.net/${SUBSCRIPTION_BUCKET}/${SUBSCRIPTION_OBJECT}"
+IAM_METADATA_URL="http://169.254.169.254/computeMetadata/v1/instance/service-accounts/default/token"
+
 rm -rf "$BASE_WORK"
 mkdir -p "$BASE_WORK"
 
@@ -714,5 +719,204 @@ if [[ "$SUMMARY_STATUS" -ne 0 || ! -s "$SUMMARY_FILE" ]]; then
     '{ok:false,error:"summary_generation_failed",jq_exit_status:$status}')"
   respond_json 500 "$BODY"
 fi
+
+# ------------------------------------------------------------
+# Publish the final subscription to Yandex Object Storage.
+# Safety rule: never replace the last-known-good subscription
+# with an empty or failed build.
+# ------------------------------------------------------------
+
+FINAL_COUNT="$(jq -r '.geo.final_count // 0' "$SUMMARY_FILE")"
+NAMING_FAILED="$(jq -r '.naming.naming_failed // 0' "$SUMMARY_FILE")"
+
+if [[ "$FINAL_COUNT" -le 0 ]]; then
+  BODY="$(jq -cn \
+    --arg bucket "$SUBSCRIPTION_BUCKET" \
+    --arg object "$SUBSCRIPTION_OBJECT" \
+    '{ok:false,error:"publication_skipped_empty_subscription",bucket:$bucket,object:$object,last_good_subscription_preserved:true}')"
+  respond_json 500 "$BODY"
+fi
+
+if [[ "$NAMING_FAILED" -ne 0 ]]; then
+  BODY="$(jq -cn \
+    --argjson naming_failed "$NAMING_FAILED" \
+    '{ok:false,error:"publication_skipped_naming_failed",naming_failed:$naming_failed,last_good_subscription_preserved:true}')"
+  respond_json 500 "$BODY"
+fi
+
+SUBSCRIPTION_FILE="$BASE_WORK/subscription.txt"
+jq -r '.subscription_text // empty' "$SUMMARY_FILE" >"$SUBSCRIPTION_FILE"
+
+if [[ ! -s "$SUBSCRIPTION_FILE" ]]; then
+  BODY='{"ok":false,"error":"publication_subscription_file_empty","last_good_subscription_preserved":true}'
+  respond_json 500 "$BODY"
+fi
+
+# Ensure there is exactly one trailing newline.
+python3 - "$SUBSCRIPTION_FILE" <<'PY'
+from pathlib import Path
+import sys
+
+p = Path(sys.argv[1])
+data = p.read_bytes().rstrip(b"\r\n") + b"\n"
+p.write_bytes(data)
+PY
+NORMALIZE_STATUS=$?
+
+if [[ "$NORMALIZE_STATUS" -ne 0 || ! -s "$SUBSCRIPTION_FILE" ]]; then
+  BODY="$(jq -cn \
+    --argjson exit_status "$NORMALIZE_STATUS" \
+    '{ok:false,error:"publication_subscription_normalize_failed",exit_status:$exit_status,last_good_subscription_preserved:true}')"
+  respond_json 500 "$BODY"
+fi
+
+SUBSCRIPTION_LINES="$(grep -cve '^[[:space:]]*$' "$SUBSCRIPTION_FILE" || true)"
+if [[ "$SUBSCRIPTION_LINES" -ne "$FINAL_COUNT" ]]; then
+  BODY="$(jq -cn \
+    --argjson expected "$FINAL_COUNT" \
+    --argjson actual "$SUBSCRIPTION_LINES" \
+    '{ok:false,error:"publication_line_count_mismatch",expected:$expected,actual:$actual,last_good_subscription_preserved:true}')"
+  respond_json 500 "$BODY"
+fi
+
+TOKEN_STDERR="$BASE_WORK/iam_token.stderr.log"
+TOKEN_JSON="$(
+  curl -fsS \
+    --connect-timeout 2 \
+    --max-time 8 \
+    --header "Metadata-Flavor: Google" \
+    "$IAM_METADATA_URL" \
+    2>"$TOKEN_STDERR"
+)"
+TOKEN_STATUS=$?
+
+if [[ "$TOKEN_STATUS" -ne 0 ]]; then
+  TOKEN_ERROR="$(tail -c 4000 "$TOKEN_STDERR" 2>/dev/null || true)"
+  BODY="$(jq -cn \
+    --argjson exit_status "$TOKEN_STATUS" \
+    --arg detail "$TOKEN_ERROR" \
+    '{ok:false,error:"publication_iam_token_request_failed",exit_status:$exit_status,detail:$detail,last_good_subscription_preserved:true}')"
+  respond_json 500 "$BODY"
+fi
+
+IAM_TOKEN="$(printf '%s' "$TOKEN_JSON" | jq -r '.access_token // empty' 2>/dev/null || true)"
+if [[ -z "$IAM_TOKEN" ]]; then
+  BODY='{"ok":false,"error":"publication_iam_token_missing","last_good_subscription_preserved":true}'
+  respond_json 500 "$BODY"
+fi
+
+UPLOAD_RESPONSE="$BASE_WORK/storage_put_response.txt"
+UPLOAD_STDERR="$BASE_WORK/storage_put.stderr.log"
+
+UPLOAD_HTTP="$(
+  curl -sS \
+    --connect-timeout 5 \
+    --max-time 30 \
+    --request PUT \
+    --header "Authorization: Bearer ${IAM_TOKEN}" \
+    --header "Content-Type: text/plain; charset=utf-8" \
+    --header "Cache-Control: no-cache, max-age=0, must-revalidate" \
+    --upload-file "$SUBSCRIPTION_FILE" \
+    --output "$UPLOAD_RESPONSE" \
+    --write-out '%{http_code}' \
+    "$SUBSCRIPTION_URL" \
+    2>"$UPLOAD_STDERR"
+)"
+UPLOAD_STATUS=$?
+
+# Forget the token as soon as the authenticated request is complete.
+unset IAM_TOKEN
+TOKEN_JSON=""
+
+if [[ "$UPLOAD_STATUS" -ne 0 || "$UPLOAD_HTTP" != "200" ]]; then
+  UPLOAD_ERROR="$(tail -c 4000 "$UPLOAD_STDERR" 2>/dev/null || true)"
+  UPLOAD_BODY="$(tail -c 4000 "$UPLOAD_RESPONSE" 2>/dev/null || true)"
+  BODY="$(jq -cn \
+    --argjson exit_status "$UPLOAD_STATUS" \
+    --arg http_status "$UPLOAD_HTTP" \
+    --arg detail "$UPLOAD_ERROR" \
+    --arg response "$UPLOAD_BODY" \
+    --arg url "$SUBSCRIPTION_URL" \
+    '{ok:false,error:"publication_object_storage_put_failed",exit_status:$exit_status,http_status:$http_status,detail:$detail,response:$response,url:$url,last_good_subscription_preserved:true}')"
+  respond_json 500 "$BODY"
+fi
+
+# Public read verification. This confirms both the bucket setting and
+# that clients will receive exactly the bytes we just published.
+VERIFY_FILE="$BASE_WORK/subscription.public.verify.txt"
+VERIFY_STDERR="$BASE_WORK/subscription.public.verify.stderr.log"
+
+VERIFY_HTTP="$(
+  curl -sS \
+    --connect-timeout 5 \
+    --max-time 30 \
+    --header "Cache-Control: no-cache" \
+    --output "$VERIFY_FILE" \
+    --write-out '%{http_code}' \
+    "${SUBSCRIPTION_URL}?verify=$(date +%s)" \
+    2>"$VERIFY_STDERR"
+)"
+VERIFY_STATUS=$?
+
+if [[ "$VERIFY_STATUS" -ne 0 || "$VERIFY_HTTP" != "200" ]]; then
+  VERIFY_ERROR="$(tail -c 4000 "$VERIFY_STDERR" 2>/dev/null || true)"
+  BODY="$(jq -cn \
+    --argjson exit_status "$VERIFY_STATUS" \
+    --arg http_status "$VERIFY_HTTP" \
+    --arg detail "$VERIFY_ERROR" \
+    --arg url "$SUBSCRIPTION_URL" \
+    '{ok:false,error:"publication_public_read_verification_failed",exit_status:$exit_status,http_status:$http_status,detail:$detail,url:$url,object_was_uploaded:true}')"
+  respond_json 500 "$BODY"
+fi
+
+if ! cmp -s "$SUBSCRIPTION_FILE" "$VERIFY_FILE"; then
+  BODY="$(jq -cn \
+    --arg url "$SUBSCRIPTION_URL" \
+    '{ok:false,error:"publication_public_content_mismatch",url:$url,object_was_uploaded:true}')"
+  respond_json 500 "$BODY"
+fi
+
+SUBSCRIPTION_BYTES="$(wc -c <"$SUBSCRIPTION_FILE" | tr -d ' ')"
+SUBSCRIPTION_SHA256="$(sha256sum "$SUBSCRIPTION_FILE" | awk '{print $1}')"
+PUBLISHED_AT="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+
+SUMMARY_UPDATED="$BASE_WORK/summary.published.json"
+jq \
+  --arg bucket "$SUBSCRIPTION_BUCKET" \
+  --arg object "$SUBSCRIPTION_OBJECT" \
+  --arg url "$SUBSCRIPTION_URL" \
+  --arg published_at "$PUBLISHED_AT" \
+  --arg sha256 "$SUBSCRIPTION_SHA256" \
+  --argjson bytes "$SUBSCRIPTION_BYTES" \
+  --argjson lines "$SUBSCRIPTION_LINES" \
+  '. + {
+    publication:{
+      ok:true,
+      bucket:$bucket,
+      object:$object,
+      url:$url,
+      published_at_utc:$published_at,
+      http_status:200,
+      public_read_verified:true,
+      lines:$lines,
+      bytes:$bytes,
+      sha256:$sha256,
+      cache_control:"no-cache, max-age=0, must-revalidate"
+    }
+  }' \
+  "$SUMMARY_FILE" >"$SUMMARY_UPDATED"
+
+PUBLISH_SUMMARY_STATUS=$?
+if [[ "$PUBLISH_SUMMARY_STATUS" -ne 0 || ! -s "$SUMMARY_UPDATED" ]]; then
+  BODY="$(jq -cn \
+    --argjson exit_status "$PUBLISH_SUMMARY_STATUS" \
+    --arg url "$SUBSCRIPTION_URL" \
+    '{ok:false,error:"publication_summary_update_failed",exit_status:$exit_status,url:$url,object_was_uploaded:true}')"
+  respond_json 500 "$BODY"
+fi
+
+mv "$SUMMARY_UPDATED" "$SUMMARY_FILE"
+
+echo "Published subscription: url=$SUBSCRIPTION_URL lines=$SUBSCRIPTION_LINES bytes=$SUBSCRIPTION_BYTES sha256=$SUBSCRIPTION_SHA256" >&2
 
 respond_file 200 "$SUMMARY_FILE"
