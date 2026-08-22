@@ -1,0 +1,88 @@
+name: Build Yandex RU batch 20
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build dependency
+        run: python -m pip install --disable-pip-version-check PyYAML
+
+      - name: Convert first 20 unique configs to Mihomo
+        run: |
+          python yandex_probe/build_ru_batch.py \
+            --input output/unique.txt \
+            --limit 20 \
+            --output-dir yandex_probe/generated
+
+      - name: Download latest stable Mihomo
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TAG="$(curl -fsSL https://api.github.com/repos/MetaCubeX/mihomo/releases/latest | jq -r '.tag_name')"
+          test -n "$TAG"
+          test "$TAG" != "null"
+
+          URL="https://github.com/MetaCubeX/mihomo/releases/download/${TAG}/mihomo-linux-amd64-compatible-${TAG}.gz"
+
+          curl -fL --retry 3 "$URL" -o mihomo.gz
+          gzip -d mihomo.gz
+          chmod +x mihomo
+
+          ./mihomo -v
+
+          if ldd ./mihomo 2>&1 | grep -Eq '=>|ld-linux'; then
+            echo "::error::Mihomo binary appears dynamically linked."
+            ldd ./mihomo || true
+            exit 1
+          fi
+
+      - name: Build RU batch package
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf package
+          mkdir package
+
+          cp mihomo package/mihomo
+          cp yandex_probe/handler_batch.sh package/handler.sh
+          cp yandex_probe/generated/config.yaml package/config.yaml
+          cp yandex_probe/generated/meta.json package/meta.json
+
+          chmod +x package/handler.sh package/mihomo
+
+          cd package
+          zip -9 ../yandex-mihomo-batch-20.zip handler.sh config.yaml meta.json mihomo
+          cd ..
+
+          echo "===== package ====="
+          ls -lh yandex-mihomo-batch-20.zip
+          unzip -l yandex-mihomo-batch-20.zip
+          echo
+          echo "===== batch metadata ====="
+          cat yandex_probe/generated/meta.json
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: yandex-mihomo-batch-20
+          path: yandex-mihomo-batch-20.zip
+          if-no-files-found: error
+          retention-days: 7
