@@ -24,8 +24,10 @@ GEO_TIMEOUT_SECONDS=6
 SUBSCRIPTION_BUCKET="${SUBSCRIPTION_BUCKET:-tony-vpn-subscription-2026}"
 SUBSCRIPTION_TXT_OBJECT="${SUBSCRIPTION_TXT_OBJECT:-subscription.txt}"
 SUBSCRIPTION_YAML_OBJECT="${SUBSCRIPTION_YAML_OBJECT:-subscription.yaml}"
+SUBSCRIPTION_HIDDIFY_OBJECT="${SUBSCRIPTION_HIDDIFY_OBJECT:-subscription-hiddify.txt}"
 SUBSCRIPTION_TXT_URL="https://storage.yandexcloud.net/${SUBSCRIPTION_BUCKET}/${SUBSCRIPTION_TXT_OBJECT}"
 SUBSCRIPTION_YAML_URL="https://storage.yandexcloud.net/${SUBSCRIPTION_BUCKET}/${SUBSCRIPTION_YAML_OBJECT}"
+SUBSCRIPTION_HIDDIFY_URL="https://storage.yandexcloud.net/${SUBSCRIPTION_BUCKET}/${SUBSCRIPTION_HIDDIFY_OBJECT}"
 IAM_METADATA_URL="http://169.254.169.254/computeMetadata/v1/instance/service-accounts/default/token"
 
 rm -rf "$BASE_WORK"
@@ -725,8 +727,9 @@ fi
 # ------------------------------------------------------------
 # Publish final subscriptions to Yandex Object Storage.
 #
-# subscription.yaml = primary Mihomo/Clash profile
-# subscription.txt  = raw URI list for compatible clients
+# subscription.yaml        = Mihomo profile
+# subscription.txt         = current raw/named URI list for Lxbox
+# subscription-hiddify.txt = separately sanitized URI list for Hiddify
 #
 # Safety:
 # - never publish an empty result;
@@ -787,6 +790,355 @@ if [[ "$TXT_LINES" -ne "$FINAL_COUNT" ]]; then
     '{ok:false,error:"publication_txt_line_count_mismatch",expected:$expected,actual:$actual,last_good_subscription_preserved:true}')"
   respond_json 500 "$BODY"
 fi
+
+# Build a Hiddify-specific share-link subscription.
+#
+# The semantic rules mirror the old vpn-subscription engine adapters:
+# - only fields actually consumed by the protocol/transport are retained;
+# - raw -> tcp;
+# - gRPC keeps serviceName but drops unrelated path/host fields;
+# - WS keeps path + host;
+# - HTTP Upgrade keeps path + host;
+# - XHTTP keeps path + host + mode (+ valid extra payload);
+# - packetEncoding / packet-encoding is not emitted for VLESS/VMess because
+#   the old Xray adapter never consumed it;
+# - allowInsecure/insecure/skip-cert-verify is NOT emitted for
+#   VLESS/Trojan/VMess Hiddify links;
+# - Hysteria2 normalizes that semantic flag to sing-box-style insecure=1;
+# - unknown query fields are dropped instead of being passed to Hiddify.
+#
+# The original subscription.txt and Mihomo YAML are untouched.
+HIDDIFY_FILE="$BASE_WORK/subscription-hiddify.txt"
+HIDDIFY_STATS_FILE="$BASE_WORK/hiddify-stats.json"
+
+python3 - "$SUMMARY_FILE" "$HIDDIFY_FILE" "$HIDDIFY_STATS_FILE" <<'PY'
+from __future__ import annotations
+
+import base64
+import json
+import sys
+from collections import Counter
+from pathlib import Path
+from urllib.parse import parse_qsl, quote
+
+summary_path = Path(sys.argv[1])
+out_path = Path(sys.argv[2])
+stats_path = Path(sys.argv[3])
+
+summary = json.loads(summary_path.read_text(encoding="utf-8"))
+nodes = summary.get("final_survivors") or []
+
+TRUTHY = {"1", "true", "yes", "on"}
+
+def first(pairs, *names, default=""):
+    for name in names:
+        for k, v in pairs:
+            if k == name:
+                return v
+    return default
+
+def truthy(pairs, *names):
+    return str(first(pairs, *names, default="")).strip().lower() in TRUTHY
+
+def split_uri(uri: str):
+    no_fragment = uri.split("#", 1)[0]
+    if "?" in no_fragment:
+        base, query = no_fragment.split("?", 1)
+    else:
+        base, query = no_fragment, ""
+    return base, parse_qsl(query, keep_blank_values=True)
+
+def named(base: str, query_pairs, display_name: str):
+    query = ""
+    if query_pairs:
+        # Encode values safely while keeping protocol field names readable.
+        parts = []
+        for k, v in query_pairs:
+            parts.append(f"{quote(str(k), safe='-._~')}={quote(str(v), safe='-._~,:/@[]{}')}")
+        query = "?" + "&".join(parts)
+    return base + query + "#" + quote(display_name, safe="")
+
+def normalized_network(pairs):
+    network = (first(pairs, "type", default="tcp") or "tcp").strip().lower()
+    if network in {"raw", "none", ""}:
+        return "tcp"
+    return network
+
+def normalized_security(pairs):
+    security = (first(pairs, "security", default="none") or "none").strip().lower()
+    if security in {"false", "0", "off", "no", ""}:
+        return "none"
+    return security
+
+def transport_pairs(pairs, network):
+    out = [("type", network)]
+    if network == "ws":
+        out.append(("path", first(pairs, "path", default="/") or "/"))
+        host = first(pairs, "host", default="")
+        if host:
+            out.append(("host", host))
+    elif network == "grpc":
+        service = first(pairs, "serviceName", "service_name", default="")
+        if service:
+            out.append(("serviceName", service))
+    elif network == "httpupgrade":
+        out.append(("path", first(pairs, "path", default="/") or "/"))
+        host = first(pairs, "host", default="")
+        if host:
+            out.append(("host", host))
+    elif network == "xhttp":
+        out.append(("path", first(pairs, "path", default="/") or "/"))
+        host = first(pairs, "host", default="")
+        if host:
+            out.append(("host", host))
+        mode = first(pairs, "mode", default="auto") or "auto"
+        out.append(("mode", mode))
+        extra = first(pairs, "extra", default="")
+        if extra:
+            try:
+                parsed = json.loads(extra)
+                if isinstance(parsed, dict):
+                    out.append(("extra", json.dumps(parsed, ensure_ascii=False, separators=(",", ":"))))
+            except Exception:
+                pass
+        elif first(pairs, "x_padding_bytes", "xPaddingBytes", default=""):
+            out.append((
+                "x_padding_bytes",
+                first(pairs, "x_padding_bytes", "xPaddingBytes", default=""),
+            ))
+    # For tcp/http/h2/http2 and unknown-but-already-tested transport values
+    # we keep only type, matching the old Xray adapter's effective input.
+    return out
+
+def clean_vless_or_trojan(uri, display_name, scheme):
+    base, pairs = split_uri(uri)
+    network = normalized_network(pairs)
+    security = normalized_security(pairs)
+
+    out = []
+
+    if scheme == "vless":
+        encryption = first(pairs, "encryption", default="none") or "none"
+        # Current Hiddify/sing-box does not support non-default VLESS encryption.
+        # Do not silently change such a node into another connection.
+        if encryption.lower() != "none":
+            return None, "vless_nondefault_encryption"
+        out.append(("encryption", "none"))
+
+        flow = first(pairs, "flow", default="")
+        if flow:
+            out.append(("flow", flow))
+
+    if security != "none":
+        out.append(("security", security))
+
+    if security in {"tls", "reality"}:
+        sni = first(pairs, "sni", default="")
+        if sni:
+            out.append(("sni", sni))
+        fp = first(pairs, "fp", default="")
+        if fp:
+            out.append(("fp", fp))
+        alpn = first(pairs, "alpn", default="")
+        if alpn:
+            out.append(("alpn", alpn))
+
+    if security == "reality":
+        pbk = first(pairs, "pbk", default="")
+        if pbk:
+            out.append(("pbk", pbk))
+        sid = first(pairs, "sid", default="")
+        if sid:
+            out.append(("sid", sid))
+        spx = first(pairs, "spx", default="")
+        if spx:
+            out.append(("spx", spx))
+
+    out.extend(transport_pairs(pairs, network))
+    return named(base, out, display_name), None
+
+def b64decode_loose(s: str) -> bytes:
+    s = s.strip()
+    s += "=" * (-len(s) % 4)
+    return base64.urlsafe_b64decode(s.encode())
+
+def clean_vmess(uri, display_name):
+    raw = uri[len("vmess://"):].split("#", 1)[0]
+    try:
+        src = json.loads(b64decode_loose(raw).decode("utf-8"))
+    except Exception:
+        return None, "vmess_decode_failed"
+
+    for required in ("add", "port", "id"):
+        if not src.get(required):
+            return None, f"vmess_missing_{required}"
+
+    network = str(src.get("net", "tcp") or "tcp").strip().lower()
+    if network in {"raw", "none", ""}:
+        network = "tcp"
+
+    tls_value = str(src.get("tls", "") or "")
+    out = {
+        "v": str(src.get("v", "2") or "2"),
+        "ps": display_name,
+        "add": src["add"],
+        "port": str(src["port"]),
+        "id": src["id"],
+        "aid": str(src.get("aid", 0) or 0),
+        "scy": src.get("scy", "auto") or "auto",
+        "net": network,
+    }
+
+    if tls_value:
+        out["tls"] = tls_value
+
+    if tls_value.lower() == "tls":
+        for k in ("sni", "fp", "alpn"):
+            if src.get(k):
+                out[k] = src[k]
+
+    if network == "ws":
+        out["path"] = src.get("path", "/") or "/"
+        if src.get("host"):
+            out["host"] = src["host"]
+    elif network == "grpc":
+        service = src.get("serviceName", src.get("service_name", ""))
+        if service:
+            out["serviceName"] = service
+    elif network == "httpupgrade":
+        out["path"] = src.get("path", "/") or "/"
+        if src.get("host"):
+            out["host"] = src["host"]
+    elif network == "xhttp":
+        out["path"] = src.get("path", "/") or "/"
+        if src.get("host"):
+            out["host"] = src["host"]
+        out["mode"] = src.get("mode", "auto") or "auto"
+
+    # Deliberately omit:
+    # allowInsecure / insecure / skip-cert-verify,
+    # packetEncoding / packet-encoding,
+    # unknown source-specific JSON keys.
+    payload = json.dumps(out, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    encoded = base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+    return "vmess://" + encoded, None
+
+def clean_ss(uri, display_name):
+    base, pairs = split_uri(uri)
+    # The old Xray SS adapter uses only method/password/server/port and does not
+    # consume SIP002 plugin query fields. Do not publish a broken stripped plugin
+    # node to Hiddify: skip it if an actual non-empty query is present.
+    meaningful = [(k, v) for k, v in pairs if k or v]
+    if meaningful:
+        return None, "ss_query_requires_unsupported_extension"
+    return named(base, [], display_name), None
+
+def clean_hysteria2(uri, display_name):
+    base, pairs = split_uri(uri)
+    if base.startswith("hy2://"):
+        base = "hysteria2://" + base[len("hy2://"):]
+
+    out = []
+    sni = first(pairs, "sni", default="")
+    if sni:
+        out.append(("sni", sni))
+
+    # Preserve the semantic TLS-insecure bit in sing-box/Hysteria2 form while
+    # removing allowInsecure itself.
+    if truthy(pairs, "insecure", "allowInsecure"):
+        out.append(("insecure", "1"))
+
+    alpn = first(pairs, "alpn", default="")
+    if alpn:
+        out.append(("alpn", alpn))
+
+    fp = first(pairs, "fp", default="")
+    if fp:
+        out.append(("fp", fp))
+
+    up = first(pairs, "upmbps", default="")
+    down = first(pairs, "downmbps", default="")
+    if up:
+        out.append(("upmbps", up))
+    if down:
+        out.append(("downmbps", down))
+
+    obfs = first(pairs, "obfs", default="")
+    if obfs:
+        out.append(("obfs", obfs))
+        obfs_password = first(pairs, "obfs-password", "obfs_password", default="")
+        if obfs_password:
+            out.append(("obfs-password", obfs_password))
+
+    return named(base, out, display_name), None
+
+def clean_node(item):
+    uri = str(item.get("uri") or "").strip()
+    display_name = str(item.get("display_name") or "").strip()
+    if not uri or not display_name or "://" not in uri:
+        return None, "missing_uri_or_name"
+
+    scheme = uri.split("://", 1)[0].lower()
+    if scheme in {"vless", "trojan"}:
+        return clean_vless_or_trojan(uri, display_name, scheme)
+    if scheme == "vmess":
+        return clean_vmess(uri, display_name)
+    if scheme == "ss":
+        return clean_ss(uri, display_name)
+    if scheme in {"hysteria2", "hy2"}:
+        return clean_hysteria2(uri, display_name)
+    return None, "unsupported_protocol"
+
+lines = []
+reasons = Counter()
+protocols = Counter()
+
+for item in nodes:
+    uri = str(item.get("uri") or "")
+    scheme = uri.split("://", 1)[0].lower() if "://" in uri else "unknown"
+    cleaned, reason = clean_node(item)
+    if cleaned:
+        lines.append(cleaned)
+        protocols[scheme] += 1
+    else:
+        reasons[reason or "unknown"] += 1
+
+# Preserve final RU-latency ordering: nodes are already sorted in final_survivors.
+out_path.write_text(
+    "\n".join(lines) + ("\n" if lines else ""),
+    encoding="utf-8",
+)
+
+stats = {
+    "input_final_nodes": len(nodes),
+    "published": len(lines),
+    "skipped": len(nodes) - len(lines),
+    "protocols_published": dict(sorted(protocols.items())),
+    "skip_reasons": dict(sorted(reasons.items())),
+    "policy": (
+        "semantic allowlist based on vpn-subscription Xray/sing-box adapters; "
+        "Hiddify-only removal of unsupported extra URI fields"
+    ),
+}
+stats_path.write_text(
+    json.dumps(stats, ensure_ascii=False, separators=(",", ":")),
+    encoding="utf-8",
+)
+
+if not lines:
+    raise SystemExit("no Hiddify-compatible nodes were generated")
+PY
+HIDDIFY_BUILD_STATUS=$?
+
+if [[ "$HIDDIFY_BUILD_STATUS" -ne 0 || ! -s "$HIDDIFY_FILE" || ! -s "$HIDDIFY_STATS_FILE" ]]; then
+  BODY="$(jq -cn \
+    --argjson exit_status "$HIDDIFY_BUILD_STATUS" \
+    '{ok:false,error:"publication_hiddify_build_failed",exit_status:$exit_status,last_good_subscription_preserved:true}')"
+  respond_json 500 "$BODY"
+fi
+
+HIDDIFY_LINES="$(grep -cve '^[[:space:]]*$' "$HIDDIFY_FILE" || true)"
+HIDDIFY_SKIPPED="$(jq -r '.skipped // 0' "$HIDDIFY_STATS_FILE")"
 
 # Build a real Mihomo YAML profile from the exact sanitized proxy
 # definitions that were already accepted by Mihomo during the build.
@@ -1025,6 +1377,12 @@ publish_and_verify \
   "text/plain; charset=utf-8" \
   "txt"
 
+publish_and_verify \
+  "$HIDDIFY_FILE" \
+  "$SUBSCRIPTION_HIDDIFY_URL" \
+  "text/plain; charset=utf-8" \
+  "hiddify"
+
 unset IAM_TOKEN
 TOKEN_JSON=""
 
@@ -1032,6 +1390,8 @@ YAML_BYTES="$(wc -c <"$YAML_FILE" | tr -d ' ')"
 YAML_SHA256="$(sha256sum "$YAML_FILE" | awk '{print $1}')"
 TXT_BYTES="$(wc -c <"$TXT_FILE" | tr -d ' ')"
 TXT_SHA256="$(sha256sum "$TXT_FILE" | awk '{print $1}')"
+HIDDIFY_BYTES="$(wc -c <"$HIDDIFY_FILE" | tr -d ' ')"
+HIDDIFY_SHA256="$(sha256sum "$HIDDIFY_FILE" | awk '{print $1}')"
 PUBLISHED_AT="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
 
 SUMMARY_UPDATED="$BASE_WORK/summary.published.json"
@@ -1043,10 +1403,17 @@ jq \
   --arg txt_object "$SUBSCRIPTION_TXT_OBJECT" \
   --arg txt_url "$SUBSCRIPTION_TXT_URL" \
   --arg txt_sha256 "$TXT_SHA256" \
+  --arg hiddify_object "$SUBSCRIPTION_HIDDIFY_OBJECT" \
+  --arg hiddify_url "$SUBSCRIPTION_HIDDIFY_URL" \
+  --arg hiddify_sha256 "$HIDDIFY_SHA256" \
+  --argjson hiddify_lines "$HIDDIFY_LINES" \
+  --argjson hiddify_skipped "$HIDDIFY_SKIPPED" \
+  --slurpfile hiddify_stats "$HIDDIFY_STATS_FILE" \
   --arg published_at "$PUBLISHED_AT" \
   --argjson final_count "$FINAL_COUNT" \
   --argjson yaml_bytes "$YAML_BYTES" \
   --argjson txt_bytes "$TXT_BYTES" \
+  --argjson hiddify_bytes "$HIDDIFY_BYTES" \
   '. + {
     publication:{
       ok:true,
@@ -1068,9 +1435,23 @@ jq \
         url:$txt_url,
         http_status:200,
         public_read_verified:true,
+        target:"Lxbox",
         lines:$final_count,
         bytes:$txt_bytes,
         sha256:$txt_sha256
+      },
+      hiddify:{
+        object:$hiddify_object,
+        url:$hiddify_url,
+        http_status:200,
+        public_read_verified:true,
+        target:"Hiddify",
+        input_final_nodes:$final_count,
+        lines:$hiddify_lines,
+        skipped:$hiddify_skipped,
+        bytes:$hiddify_bytes,
+        sha256:$hiddify_sha256,
+        conversion:($hiddify_stats[0] // {})
       },
       cache_control:"no-cache, max-age=0, must-revalidate"
     }
@@ -1089,6 +1470,7 @@ fi
 mv "$SUMMARY_UPDATED" "$SUMMARY_FILE"
 
 echo "Published Mihomo YAML: url=$SUBSCRIPTION_YAML_URL proxies=$FINAL_COUNT bytes=$YAML_BYTES sha256=$YAML_SHA256" >&2
-echo "Published raw URI TXT: url=$SUBSCRIPTION_TXT_URL lines=$FINAL_COUNT bytes=$TXT_BYTES sha256=$TXT_SHA256" >&2
+echo "Published raw URI TXT (Lxbox): url=$SUBSCRIPTION_TXT_URL lines=$FINAL_COUNT bytes=$TXT_BYTES sha256=$TXT_SHA256" >&2
+echo "Published Hiddify TXT: url=$SUBSCRIPTION_HIDDIFY_URL lines=$HIDDIFY_LINES skipped=$HIDDIFY_SKIPPED bytes=$HIDDIFY_BYTES sha256=$HIDDIFY_SHA256" >&2
 
 respond_file 200 "$SUMMARY_FILE"
