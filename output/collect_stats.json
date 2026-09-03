@@ -2,27 +2,27 @@
   "max_unique": 10000,
   "sources_total": 3,
   "sources_downloaded": 1,
-  "found": 70191,
-  "valid_before_dedup": 10001,
-  "malformed": 1067,
-  "duplicates": 1,
+  "found": 67120,
+  "valid_before_dedup": 10002,
+  "malformed": 1245,
+  "duplicates": 2,
   "unique": 10000,
   "protocols": {
-    "hy2": 8,
-    "hysteria2": 62,
-    "ss": 396,
-    "trojan": 3028,
+    "hy2": 0,
+    "hysteria2": 31,
+    "ss": 224,
+    "trojan": 3113,
     "tuic": 0,
-    "vless": 6318,
-    "vmess": 188
+    "vless": 6455,
+    "vmess": 177
   },
   "per_source": {
     "https://raw.githubusercontent.com/morpheusadam/v2ray-config/main/subs/bundles/all.txt": {
       "download_ok": true,
-      "found": 70191,
-      "valid": 10001,
-      "malformed": 1067,
-      "duplicates": 1,
+      "found": 67120,
+      "valid": 10002,
+      "malformed": 1245,
+      "duplicates": 2,
       "unique_contribution": 10000
     }
   }
