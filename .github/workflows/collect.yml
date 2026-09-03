@@ -21,7 +21,7 @@ jobs:
           python-version: "3.12"
 
       - name: Run collector
-        run: python collector.py
+        run: MAX_UNIQUE=0 python collector.py
 
       - name: Show collection statistics
         run: |

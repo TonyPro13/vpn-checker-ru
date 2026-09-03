@@ -63,7 +63,7 @@ jobs:
         run: |
           python yandex_probe/build_ru_output_batch.py \
             --input output/unique.txt \
-            --limit 10000 \
+            --limit 0 \
             --output-dir yandex_probe/generated_ru_speed
 
           echo "===== conversion metadata ====="
