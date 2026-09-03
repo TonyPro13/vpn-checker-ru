@@ -7,3 +7,9 @@ https://raw.githubusercontent.com/morpheusadam/v2ray-config/main/subs/bundles/al
 # Control/reference source
 https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/BLACK_VLESS_RUS.txt
 https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/BLACK_SS%2BAll_RUS.txt
+https://raw.githubusercontent.com/ebrasha/free-v2ray-public-list/refs/heads/main/all_extracted_configs.txt
+https://raw.githubusercontent.com/Epodonios/v2ray-configs/refs/heads/main/All_Configs_Sub.txt
+https://raw.githubusercontent.com/MatinGhanbari/v2ray-configs/refs/heads/main/subscriptions/base64/all_sub.txt
+https://raw.githubusercontent.com/morpheusadam/v2ray-config/refs/heads/main/subs/all.txt
+https://raw.githubusercontent.com/MahanKenway/Freedom-V2Ray/refs/heads/main/configs/mix.txt
+https://raw.githubusercontent.com/MohammadBahemmat/V2ray-Collector/refs/heads/main/all_servers.txt

@@ -622,7 +622,7 @@ jq -cn \
           end
       )
     ) as $naming
-  | ($naming.items) as $final_survivors
+  | ($naming.items[0:1000]) as $final_survivors
   | (($after_speed|length) - ($geo_complete_sorted|length)) as $removed_geo_failed
   | (
       [$geo_complete_sorted[]
