@@ -1,29 +1,93 @@
 {
-  "max_unique": 10000,
-  "sources_total": 3,
-  "sources_downloaded": 1,
-  "found": 67120,
-  "valid_before_dedup": 10002,
-  "malformed": 1245,
-  "duplicates": 2,
-  "unique": 10000,
+  "max_unique": 0,
+  "sources_total": 9,
+  "sources_downloaded": 9,
+  "found": 119180,
+  "valid_before_dedup": 113839,
+  "malformed": 5341,
+  "duplicates": 28185,
+  "unique": 85654,
   "protocols": {
-    "hy2": 0,
-    "hysteria2": 31,
-    "ss": 224,
-    "trojan": 3113,
-    "tuic": 0,
-    "vless": 6455,
-    "vmess": 177
+    "hy2": 694,
+    "hysteria2": 959,
+    "ss": 9875,
+    "trojan": 14207,
+    "tuic": 238,
+    "vless": 49545,
+    "vmess": 10136
   },
   "per_source": {
     "https://raw.githubusercontent.com/morpheusadam/v2ray-config/main/subs/bundles/all.txt": {
       "download_ok": true,
-      "found": 67120,
-      "valid": 10002,
-      "malformed": 1245,
-      "duplicates": 2,
-      "unique_contribution": 10000
+      "found": 67228,
+      "valid": 64061,
+      "malformed": 3167,
+      "duplicates": 24,
+      "unique_contribution": 64037
+    },
+    "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/BLACK_VLESS_RUS.txt": {
+      "download_ok": true,
+      "found": 65,
+      "valid": 65,
+      "malformed": 0,
+      "duplicates": 5,
+      "unique_contribution": 60
+    },
+    "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/BLACK_SS%2BAll_RUS.txt": {
+      "download_ok": true,
+      "found": 33,
+      "valid": 33,
+      "malformed": 0,
+      "duplicates": 3,
+      "unique_contribution": 30
+    },
+    "https://raw.githubusercontent.com/ebrasha/free-v2ray-public-list/refs/heads/main/all_extracted_configs.txt": {
+      "download_ok": true,
+      "found": 38485,
+      "valid": 36349,
+      "malformed": 2136,
+      "duplicates": 17012,
+      "unique_contribution": 19337
+    },
+    "https://raw.githubusercontent.com/Epodonios/v2ray-configs/refs/heads/main/All_Configs_Sub.txt": {
+      "download_ok": true,
+      "found": 7627,
+      "valid": 7592,
+      "malformed": 35,
+      "duplicates": 5968,
+      "unique_contribution": 1624
+    },
+    "https://raw.githubusercontent.com/MatinGhanbari/v2ray-configs/refs/heads/main/subscriptions/base64/all_sub.txt": {
+      "download_ok": true,
+      "found": 3966,
+      "valid": 3965,
+      "malformed": 1,
+      "duplicates": 3542,
+      "unique_contribution": 423
+    },
+    "https://raw.githubusercontent.com/morpheusadam/v2ray-config/refs/heads/main/subs/all.txt": {
+      "download_ok": true,
+      "found": 0,
+      "valid": 0,
+      "malformed": 0,
+      "duplicates": 0,
+      "unique_contribution": 0
+    },
+    "https://raw.githubusercontent.com/MahanKenway/Freedom-V2Ray/refs/heads/main/configs/mix.txt": {
+      "download_ok": true,
+      "found": 1471,
+      "valid": 1471,
+      "malformed": 0,
+      "duplicates": 1397,
+      "unique_contribution": 74
+    },
+    "https://raw.githubusercontent.com/MohammadBahemmat/V2ray-Collector/refs/heads/main/all_servers.txt": {
+      "download_ok": true,
+      "found": 305,
+      "valid": 303,
+      "malformed": 2,
+      "duplicates": 234,
+      "unique_contribution": 69
     }
   }
 }
