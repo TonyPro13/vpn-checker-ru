@@ -10,6 +10,7 @@ SPEED_BIN="$ROOT/speed_probe"
 MANIFEST="$ROOT/manifest.json"
 META="$ROOT/meta.json"
 MAPPING="$ROOT/mapping.json"
+SOURCE_BY_URI="$ROOT/source_by_uri.json"
 PROXY_DEFS="$ROOT/proxy_defs.json"
 
 SPEED_BYTES=524288
@@ -592,6 +593,7 @@ jq -cn \
   --slurpfile meta "$META" \
   --slurpfile manifest "$MANIFEST" \
   --slurpfile mapping "$MAPPING" \
+  --slurpfile source_by_uri "$SOURCE_BY_URI" \
   --slurpfile alive_nodes "$ALIVE_ARRAY_FILE" \
   --slurpfile chunks "$CHUNKS_ARRAY_FILE" \
   --slurpfile speed_results "$SPEED_RESULTS_FILE" \
@@ -765,6 +767,7 @@ jq -cn \
       )
     ) as $naming
   | ($naming.items[0:1000]) as $final_survivors
+| (reduce $final_survivors[] as $item ({}; (($source_by_uri[0][$item.uri] // "unknown") as $src | .[$src] = ((.[$src] // 0) + 1)))) as $final_by_source
   | (($after_speed|length) - ($geo_complete_sorted|length)) as $removed_geo_failed
   | (
       [$geo_complete_sorted[]
@@ -896,6 +899,7 @@ jq -cn \
       final_fastest_20:($final_survivors[0:20]),
       chunks:$chunks,
       final_survivors:$final_survivors,
+  final_by_source:$final_by_source,
       final_named_uris:($final_survivors | map(.named_uri)),
       subscription_text:($final_survivors | map(.named_uri) | join("\n"))
     }' >"$SUMMARY_FILE"

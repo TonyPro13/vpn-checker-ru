@@ -14,6 +14,7 @@ SOURCES_FILE = Path("sources.txt")
 OUT_DIR = Path("output")
 UNIQUE_FILE = OUT_DIR / "unique.txt"
 STATS_FILE = OUT_DIR / "collect_stats.json"
+SOURCE_MAP_FILE = OUT_DIR / "source_by_uri.json"
 
 SUPPORTED = {
     "vless",
@@ -333,6 +334,7 @@ def collect():
                 }
 
     unique: dict[str, str] = {}
+    source_by_uri: dict[str, str] = {}
     total_found = 0
     total_valid = 0
     total_malformed = 0
@@ -372,6 +374,7 @@ def collect():
                 continue
 
             unique[key] = uri
+            source_by_uri[uri] = url
             stats["unique_contribution"] += 1
 
             if MAX_UNIQUE > 0 and len(unique) >= MAX_UNIQUE:
@@ -384,6 +387,11 @@ def collect():
 
     UNIQUE_FILE.write_text(
         "\n".join(unique.values()) + ("\n" if unique else ""),
+        encoding="utf-8",
+    )
+
+    SOURCE_MAP_FILE.write_text(
+        json.dumps(source_by_uri, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
 
