@@ -266,7 +266,10 @@ func telegramReqPQOnce(parent context.Context, proxyPort int, host string, remot
 		return false, time.Since(start).Milliseconds(), "mtproto_invalid_packet_size"
 	}
 
-	packet := append([]byte{0xef, byte(words)}, payload...)
+    if _, err = conn.Write([]byte{0xef}); err != nil {
+        return false, time.Since(start).Milliseconds(), err.Error()
+    }
+    packet := append([]byte{byte(words)}, payload...)
 	if _, err = conn.Write(packet); err != nil {
 		return false, time.Since(start).Milliseconds(), err.Error()
 	}
