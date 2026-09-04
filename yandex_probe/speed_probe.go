@@ -432,6 +432,7 @@ func runCascade(parent context.Context, worker Worker, job Job) Result {
 		worker.Port,
 		3*time.Second,
 	); !ok {
+		fmt.Fprintf(os.Stderr, "MTProto failure: %s\n", errText)
 		return fail("telegram_mtproto", errText)
 	}
 
