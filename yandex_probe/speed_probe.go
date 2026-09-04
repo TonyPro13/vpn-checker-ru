@@ -3,6 +3,8 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto/rand"
+	"encoding/binary"
 	"context"
 	"encoding/json"
 	"flag"
@@ -27,6 +29,9 @@ type Result struct {
 	Key         string  `json:"key"`
 	OK          bool    `json:"ok"`
 	Mode        string  `json:"mode"`
+	CascadeOK     bool    `json:"cascade_ok,omitempty"`
+	FailedStage   string  `json:"failed_stage,omitempty"`
+	CascadeTotalMS int64  `json:"cascade_total_ms,omitempty"`
 	HTTPStatus  int     `json:"http_status,omitempty"`
 	Bytes       int64   `json:"bytes,omitempty"`
 	TotalMS     int64   `json:"total_ms"`
@@ -111,6 +116,327 @@ func proxyClient(port int, timeout time.Duration) (*http.Client, error) {
 		Transport: transport,
 		Timeout:   timeout,
 	}, nil
+}
+
+func runHTTPCheck(parent context.Context, worker Worker, target string, expectedStatus int, timeout time.Duration) (bool, int, int64, string) {
+	client, err := proxyClient(worker.Port, timeout)
+	if err != nil {
+		return false, 0, 0, err.Error()
+	}
+
+	ctx, cancel := context.WithTimeout(parent, timeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	if err != nil {
+		return false, 0, 0, err.Error()
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0")
+	req.Header.Set("Cache-Control", "no-cache")
+
+	start := time.Now()
+	resp, err := client.Do(req)
+	elapsed := time.Since(start).Milliseconds()
+	if err != nil {
+		return false, 0, elapsed, err.Error()
+	}
+	defer resp.Body.Close()
+
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64*1024))
+
+	if expectedStatus > 0 {
+		if resp.StatusCode != expectedStatus {
+			return false, resp.StatusCode, elapsed, fmt.Sprintf("http_status_%d", resp.StatusCode)
+		}
+	} else {
+		if resp.StatusCode < 100 || resp.StatusCode > 599 {
+			return false, resp.StatusCode, elapsed, fmt.Sprintf("invalid_http_status_%d", resp.StatusCode)
+		}
+	}
+
+	return true, resp.StatusCode, elapsed, ""
+}
+
+func socks5Connect(parent context.Context, proxyPort int, host string, port int, timeout time.Duration) (net.Conn, error) {
+	dialer := &net.Dialer{Timeout: timeout}
+
+	ctx, cancel := context.WithTimeout(parent, timeout)
+	defer cancel()
+
+	conn, err := dialer.DialContext(ctx, "tcp", fmt.Sprintf("127.0.0.1:%d", proxyPort))
+	if err != nil {
+		return nil, err
+	}
+
+	ok := false
+	defer func() {
+		if !ok {
+			_ = conn.Close()
+		}
+	}()
+
+
+
+	hostBytes := []byte(host)
+	if len(hostBytes) == 0 || len(hostBytes) > 255 {
+		return nil, fmt.Errorf("invalid_host_length")
+	}
+
+	request := []byte{0x05, 0x01, 0x00, 0x03, byte(len(hostBytes))}
+	request = append(request, hostBytes...)
+	request = append(request, byte(port>>8), byte(port))
+
+	if _, err = conn.Write(request); err != nil {
+		return nil, err
+	}
+
+	header := make([]byte, 4)
+	if _, err = io.ReadFull(conn, header); err != nil {
+		return nil, err
+
+        if header[0] != 0x05 {
+                return nil, fmt.Errorf("socks_bad_version_%d", header[0])
+        }
+        if header[1] != 0x00 {
+                return nil, fmt.Errorf("socks_connect_reply_%d", header[1])
+        }
+
+        switch header[3] {
+        case 0x01:
+                rest := make([]byte, 4+2)
+                if _, err = io.ReadFull(conn, rest); err != nil {
+                        return nil, err
+                }
+        case 0x03:
+                length := make([]byte, 1)
+                if _, err = io.ReadFull(conn, length); err != nil {
+                        return nil, err
+                }
+                rest := make([]byte, int(length[0])+2)
+                if _, err = io.ReadFull(conn, rest); err != nil {
+                        return nil, err
+                }
+        case 0x04:
+                rest := make([]byte, 16+2)
+                if _, err = io.ReadFull(conn, rest); err != nil {
+                        return nil, err
+                }
+        default:
+                return nil, fmt.Errorf("socks_bad_atyp_%d", header[3])
+        }
+
+        ok = true
+        return conn, nil
+
+
+
+func telegramReqPQOnce(parent context.Context, proxyPort int, host string, remotePort int, timeout time.Duration) (bool, int64, string) {
+	start := time.Now()
+
+	conn, err := socks5Connect(parent, proxyPort, host, remotePort, timeout)
+	if err != nil {
+		return false, time.Since(start).Milliseconds(), err.Error()
+	}
+	defer conn.Close()
+
+	_ = conn.SetDeadline(time.Now().Add(timeout))
+
+	nonce := make([]byte, 16)
+	if _, err = rand.Read(nonce); err != nil {
+		return false, time.Since(start).Milliseconds(), err.Error()
+	}
+
+	body := make([]byte, 20)
+	binary.LittleEndian.PutUint32(body[0:4], 0xBE7E8EF1)
+	copy(body[4:20], nonce)
+
+	payload := make([]byte, 20+len(body))
+	binary.LittleEndian.PutUint64(payload[8:16], uint64(time.Now().Unix())<<32)
+	binary.LittleEndian.PutUint32(payload[16:20], uint32(len(body)))
+	copy(payload[20:], body)
+
+	if len(payload)%4 != 0 {
+		return false, time.Since(start).Milliseconds(), "mtproto_payload_not_divisible_by_4"
+	}
+
+	words := len(payload) / 4
+	if words < 1 || words > 0x7e {
+		return false, time.Since(start).Milliseconds(), "mtproto_invalid_packet_size"
+	}
+
+	packet := append([]byte{0xef, byte(words)}, payload...)
+	if _, err = conn.Write(packet); err != nil {
+		return false, time.Since(start).Milliseconds(), err.Error()
+	}
+
+	first := make([]byte, 1)
+	if _, err = io.ReadFull(conn, first); err != nil {
+		return false, time.Since(start).Milliseconds(), err.Error()
+	}
+
+	var responseWords int
+	if first[0] == 0x7f {
+		more := make([]byte, 3)
+		if _, err = io.ReadFull(conn, more); err != nil {
+			return false, time.Since(start).Milliseconds(), err.Error()
+		}
+		responseWords = int(more[0]) | int(more[1])<<8 | int(more[2])<<16
+	} else if first[0] >= 1 && first[0] <= 0x7e {
+		responseWords = int(first[0])
+	} else {
+		return false, time.Since(start).Milliseconds(), fmt.Sprintf("mtproto_bad_length_byte_%02x", first[0])
+	}
+
+	responseLen := responseWords * 4
+	if responseLen < 40 || responseLen > 4096 {
+		return false, time.Since(start).Milliseconds(), fmt.Sprintf("mtproto_bad_response_size_%d", responseLen)
+	}
+
+	response := make([]byte, responseLen)
+	if _, err = io.ReadFull(conn, response); err != nil {
+		return false, time.Since(start).Milliseconds(), err.Error()
+	}
+
+	if !bytes.Equal(response[:8], make([]byte, 8)) {
+		return false, time.Since(start).Milliseconds(), "mtproto_unexpected_encrypted_response"
+	}
+
+	bodyLen := int(binary.LittleEndian.Uint32(response[16:20]))
+	if bodyLen < 36 || 20+bodyLen > len(response) {
+		return false, time.Since(start).Milliseconds(), fmt.Sprintf("mtproto_bad_body_length_%d", bodyLen)
+	}
+
+	constructor := binary.LittleEndian.Uint32(response[20:24])
+	if constructor != 0x05162463 {
+		return false, time.Since(start).Milliseconds(), fmt.Sprintf("mtproto_bad_constructor_%08x", constructor)
+	}
+
+	if !bytes.Equal(response[24:40], nonce) {
+		return false, time.Since(start).Milliseconds(), "mtproto_nonce_mismatch"
+	}
+
+	return true, time.Since(start).Milliseconds(), ""
+}
+
+func runTelegramMTProto(parent context.Context, proxyPort int, timeout time.Duration) (bool, int64, string) {
+	endpoints := []string{
+		"149.154.167.50",
+		"149.154.167.51",
+	}
+
+	var errors []string
+	var totalMS int64
+
+	for _, host := range endpoints {
+		ok, elapsed, errText := telegramReqPQOnce(parent, proxyPort, host, 443, timeout)
+		totalMS += elapsed
+
+		if ok {
+			return true, totalMS, ""
+		}
+
+		errors = append(errors, host+":"+errText)
+	}
+
+	return false, totalMS, strings.Join(errors, ";")
+}
+
+func runCascade(parent context.Context, worker Worker, job Job) Result {
+	res := Result{
+		Key:  job.Key,
+		Mode: "cascade",
+	}
+
+	start := time.Now()
+
+	fail := func(stage string, errText string) Result {
+		res.CascadeOK = false
+		res.OK = false
+		res.FailedStage = stage
+		res.Error = errText
+		res.CascadeTotalMS = time.Since(start).Milliseconds()
+		return res
+	}
+
+	// 1. ChatGPT main: strict HTTP 200, maximum 5 seconds.
+	if ok, status, _, errText := runHTTPCheck(
+		parent,
+		worker,
+		"https://chatgpt.com/robots.txt",
+		200,
+		5*time.Second,
+	); !ok {
+		return fail("chatgpt_main", fmt.Sprintf("status=%d error=%s", status, errText))
+	}
+
+	// 2. ChatGPT Auth: any real HTTP response means TLS/HTTPS is reachable.
+	if ok, status, _, errText := runHTTPCheck(
+		parent,
+		worker,
+		"https://auth.openai.com/",
+		0,
+		9*time.Second,
+	); !ok {
+		return fail("chatgpt_auth", fmt.Sprintf("status=%d error=%s", status, errText))
+	}
+
+	// 3. ChatGPT Android: any real HTTP response.
+	if ok, status, _, errText := runHTTPCheck(
+		parent,
+		worker,
+		"https://android.chat.openai.com/",
+		0,
+		9*time.Second,
+	); !ok {
+		return fail("chatgpt_android", fmt.Sprintf("status=%d error=%s", status, errText))
+	}
+
+	// 4. YouTube generate_204: strict HTTP 204.
+	if ok, status, _, errText := runHTTPCheck(
+		parent,
+		worker,
+		"https://www.youtube.com/generate_204",
+		204,
+		5*time.Second,
+	); !ok {
+		return fail("youtube_generate_204", fmt.Sprintf("status=%d error=%s", status, errText))
+	}
+
+	// 5. Second independent YouTube HTTPS check: strict HTTP 200.
+	if ok, status, _, errText := runHTTPCheck(
+		parent,
+		worker,
+		"https://www.youtube.com/robots.txt",
+		200,
+		5*time.Second,
+	); !ok {
+		return fail("youtube_robots", fmt.Sprintf("status=%d error=%s", status, errText))
+	}
+
+	// 6. Telegram HTTPS: any real HTTP response.
+	if ok, status, _, errText := runHTTPCheck(
+		parent,
+		worker,
+		"https://venus.web.telegram.org/api",
+		0,
+		3*time.Second,
+	); !ok {
+		return fail("telegram_https", fmt.Sprintf("status=%d error=%s", status, errText))
+	}
+
+	// 7. Telegram MTProto: real req_pq/resPQ through Telegram DC.
+	if ok, _, errText := runTelegramMTProto(
+		parent,
+		worker.Port,
+		3*time.Second,
+	); !ok {
+		return fail("telegram_mtproto", errText)
+	}
+
+	res.OK = true
+	res.CascadeOK = true
+	res.CascadeTotalMS = time.Since(start).Milliseconds()
+	return res
 }
 
 func runSpeed(parent context.Context, worker Worker, job Job, target string, expectedBytes int64, timeout time.Duration) Result {
@@ -354,9 +680,61 @@ func runGeo(parent context.Context, worker Worker, job Job, target, fallback str
 	return res
 }
 
+func runDelay(parent context.Context, controller string, job Job, target string, timeout time.Duration) Result {
+	res := Result{
+		Key:  job.Key,
+		Mode: "delay",
+	}
+
+	ctx, cancel := context.WithTimeout(parent, timeout+2*time.Second)
+	defer cancel()
+
+	delayURL := strings.TrimRight(controller, "/") +
+		"/proxies/" + url.PathEscape(job.Key) +
+		"/delay?timeout=" + fmt.Sprintf("%d", timeout.Milliseconds()) +
+		"&url=" + url.QueryEscape(target)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, delayURL, nil)
+	if err != nil {
+		res.Error = err.Error()
+		return res
+	}
+
+	client := &http.Client{Timeout: timeout + 2*time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		res.Error = err.Error()
+		return res
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		res.Error = fmt.Sprintf("delay_http_%d", resp.StatusCode)
+		return res
+	}
+
+	var payload struct {
+		Delay int64 `json:"delay"`
+	}
+
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64*1024)).Decode(&payload); err != nil {
+		res.Error = "delay_json: " + err.Error()
+		return res
+	}
+
+	if payload.Delay <= 0 {
+		res.Error = "delay_invalid"
+		return res
+	}
+
+	res.OK = true
+	res.TotalMS = payload.Delay
+	return res
+}
+
 func main() {
 	jobsPath := flag.String("jobs", "", "JSON file with [{key}]")
-	mode := flag.String("mode", "speed", "speed or geo")
+	mode := flag.String("mode", "speed", "speed, geo or cascade")
 	target := flag.String("url", "", "target URL")
 	fallbackURL := flag.String("fallback-url", "", "optional fallback URL for geo mode")
 	controller := flag.String("controller", "http://127.0.0.1:9090", "Mihomo controller URL")
@@ -367,12 +745,12 @@ func main() {
 	timeout := flag.Duration("timeout", 8*time.Second, "per-request timeout")
 	flag.Parse()
 
-	if *jobsPath == "" || *target == "" {
+	if *jobsPath == "" || ((*mode == "speed" || *mode == "geo") && *target == "") {
 		fmt.Fprintln(os.Stderr, "jobs and url are required")
 		os.Exit(2)
 	}
-	if *mode != "speed" && *mode != "geo" {
-		fmt.Fprintln(os.Stderr, "mode must be speed or geo")
+	if *mode != "speed" && *mode != "geo" && *mode != "cascade" {
+		fmt.Fprintln(os.Stderr, "mode must be speed, geo, cascade or delay")
 		os.Exit(2)
 	}
 
@@ -448,8 +826,12 @@ func main() {
 						*fallbackURL,
 						*timeout,
 					)
-				} else {
-					results[item.Index] = runSpeed(
+} else if *mode == "delay" {
+				results[item.Index] = runDelay(ctx, *controller, item.Job, *target, *timeout)
+			} else if *mode == "cascade" {
+				results[item.Index] = runCascade(ctx, worker, item.Job)
+			} else {
+				results[item.Index] = runSpeed(
 						ctx,
 						worker,
 						item.Job,

@@ -15,11 +15,13 @@ PROXY_DEFS="$ROOT/proxy_defs.json"
 SPEED_BYTES=524288
 SPEED_CONCURRENCY=8
 SPEED_TIMEOUT_SECONDS=8
-SPEED_MIN_MBPS=5
+SPEED_MIN_MBPS=3
 SPEED_URL_BASE="https://speed.cloudflare.com/__down"
 GEO_URL="https://ipwho.is/?fields=ip,success,country,country_code,city,flag"
 GEO_FALLBACK_URL=""
 GEO_TIMEOUT_SECONDS=6
+FINAL_DELAY_URL="https://cp.cloudflare.com"
+FINAL_DELAY_TIMEOUT_SECONDS=5
 
 SUBSCRIPTION_BUCKET="${SUBSCRIPTION_BUCKET:-tony-vpn-subscription-2026}"
 SUBSCRIPTION_TXT_OBJECT="${SUBSCRIPTION_TXT_OBJECT:-subscription.txt}"
@@ -389,8 +391,65 @@ if [[ "$ALIVE_COUNT" -gt 0 ]]; then
         | {key:$a.key}
       ]' >"$FINAL_KEYS_FILE"
 
-  FINAL_COUNT_PRE_GEO="$(jq 'length' "$FINAL_KEYS_FILE")"
+CASCADE_RESULTS_FILE="$BASE_WORK/cascade_results.json"
+CASCADE_KEYS_FILE="$BASE_WORK/cascade_keys.json"
+CASCADE_INPUT_COUNT="$(jq 'length' "$FINAL_KEYS_FILE")"
+
+printf '[]\n' >"$CASCADE_RESULTS_FILE"
+printf '[]\n' >"$CASCADE_KEYS_FILE"
+
+if [[ "$CASCADE_INPUT_COUNT" -gt 0 ]]; then
+  CASCADE_WORKERS="$SPEED_WORKERS"
+  if [[ "$CASCADE_INPUT_COUNT" -lt "$CASCADE_WORKERS" ]]; then
+    CASCADE_WORKERS="$CASCADE_INPUT_COUNT"
+  fi
+
+  echo "Cascade stage: input=$CASCADE_INPUT_COUNT workers=$CASCADE_WORKERS" >&2
+  CASCADE_START_MS="$(date +%s%3N)"
+
+  "$SPEED_BIN" \
+    --mode cascade \
+    --jobs "$FINAL_KEYS_FILE" \
+    --controller "http://127.0.0.1:9090" \
+    --group-prefix "SPEED-" \
+    --base-port 20000 \
+    --concurrency "$CASCADE_WORKERS" \
+    >"$CASCADE_RESULTS_FILE"
+
+  CASCADE_STATUS=$?
+  CASCADE_END_MS="$(date +%s%3N)"
+
+  if [[ "$CASCADE_STATUS" -ne 0 ]] || ! jq -e 'type=="array"' "$CASCADE_RESULTS_FILE" >/dev/null 2>&1; then
+    cleanup_mihomo
+    BODY="$(jq -cn --argjson exit_status "$CASCADE_STATUS" \
+      '{"ok":false,"error":"cascade_probe_failed","exit_status":$exit_status}')"
+    respond_json 500 "$BODY"
+  fi
+
+  jq -c '
+    [
+      .[]
+      | select((.cascade_ok // false) == true)
+      | {key:.key}
+    ]
+  ' "$CASCADE_RESULTS_FILE" >"$CASCADE_KEYS_FILE"
+
+  CASCADE_PASSED_COUNT="$(jq 'length' "$CASCADE_KEYS_FILE")"
+  CASCADE_ELAPSED_MS=$((CASCADE_END_MS - CASCADE_START_MS))
+
+  echo "Cascade stage complete: input=$CASCADE_INPUT_COUNT passed=$CASCADE_PASSED_COUNT removed=$((CASCADE_INPUT_COUNT-CASCADE_PASSED_COUNT)) elapsed_ms=$CASCADE_ELAPSED_MS" >&2
+else
+  CASCADE_WORKERS=0
+  CASCADE_PASSED_COUNT=0
+  CASCADE_ELAPSED_MS=0
+fi
+  FINAL_COUNT_PRE_GEO="$(jq 'length' "$CASCADE_KEYS_FILE")"
   printf '[]\n' >"$GEO_RESULTS_FILE"
+  FINAL_DELAY_WORKERS=0
+  FINAL_DELAY_PASSED_COUNT=0
+  FINAL_DELAY_ELAPSED_MS=0
+  FINAL_DELAY_RESULTS_FILE="$BASE_WORK/final_delay_results.json"
+  printf '[]\n' >"$FINAL_DELAY_RESULTS_FILE"
 
   if [[ "$FINAL_COUNT_PRE_GEO" -gt 0 ]]; then
     GEO_WORKERS="$SPEED_WORKERS"
@@ -430,6 +489,66 @@ if [[ "$ALIVE_COUNT" -gt 0 ]]; then
     GEO_ELAPSED_MS=0
   fi
 
+FINAL_DELAY_RESULTS_FILE="$BASE_WORK/final_delay_results.json"
+FINAL_DELAY_KEYS_FILE="$BASE_WORK/final_delay_keys.json"
+
+jq -c '
+  INDEX(.[]; .key) as $geo
+  | [
+      inputs[]
+      | ($geo[.key] // {}) as $g
+      | select(($g.ok // false) == true)
+      | select(($g.ip // "") | length > 0)
+      | select(($g.country // "") | length > 0)
+      | select(($g.country_code // "") | length > 0)
+      | select(($g.city // "") | length > 0)
+      | select((($g.country_code // "") | ascii_upcase) != "RU")
+      | select((($g.country_code // "") | ascii_upcase) != "UA")
+      | select((($g.country // "") | ascii_downcase) != "russia")
+      | select((($g.country // "") | ascii_downcase) != "russian federation")
+      | select((($g.country // "") | ascii_downcase) != "ukraine")
+      | {key:.key}
+    ]
+' "$GEO_RESULTS_FILE" "$CASCADE_KEYS_FILE" >"$FINAL_DELAY_KEYS_FILE"
+FINAL_DELAY_INPUT_COUNT="$(jq 'length' "$FINAL_DELAY_KEYS_FILE")"
+printf '[]\n' >"$FINAL_DELAY_RESULTS_FILE"
+
+if [[ "$FINAL_DELAY_INPUT_COUNT" -gt 0 ]]; then
+  FINAL_DELAY_WORKERS="$SPEED_WORKERS"
+  if [[ "$FINAL_DELAY_INPUT_COUNT" -lt "$FINAL_DELAY_WORKERS" ]]; then
+    FINAL_DELAY_WORKERS="$FINAL_DELAY_INPUT_COUNT"
+  fi
+
+  echo "Final RU delay stage: input=$FINAL_DELAY_INPUT_COUNT workers=$FINAL_DELAY_WORKERS url=$FINAL_DELAY_URL" >&2
+  FINAL_DELAY_START_MS="$(date +%s%3N)"
+
+  "$SPEED_BIN" \
+    --mode delay \
+    --jobs "$FINAL_DELAY_KEYS_FILE" \
+    --url "$FINAL_DELAY_URL" \
+    --controller "http://127.0.0.1:9090" \
+    --concurrency "$FINAL_DELAY_WORKERS" \
+    --timeout "$FINAL_DELAY_TIMEOUT_SECONDS"s \
+    >"$FINAL_DELAY_RESULTS_FILE"
+
+  FINAL_DELAY_STATUS=$?
+  FINAL_DELAY_END_MS="$(date +%s%3N)"
+  FINAL_DELAY_ELAPSED_MS=$((FINAL_DELAY_END_MS - FINAL_DELAY_START_MS))
+
+  if [[ "$FINAL_DELAY_STATUS" -ne 0 ]] || ! jq -e 'type=="array"' "$FINAL_DELAY_RESULTS_FILE" >/dev/null 2>&1; then
+    cleanup_mihomo
+    BODY="$(jq -cn --argjson exit_status "$FINAL_DELAY_STATUS" \
+      '{ok:false,error:"final_delay_probe_failed",exit_status:$exit_status}')"
+    respond_json 500 "$BODY"
+  fi
+
+  FINAL_DELAY_PASSED_COUNT="$(jq '[.[] | select((.ok // false) == true)] | length' "$FINAL_DELAY_RESULTS_FILE")"
+  echo "Final RU delay stage complete: input=$FINAL_DELAY_INPUT_COUNT passed=$FINAL_DELAY_PASSED_COUNT removed=$((FINAL_DELAY_INPUT_COUNT-FINAL_DELAY_PASSED_COUNT)) elapsed_ms=$FINAL_DELAY_ELAPSED_MS" >&2
+else
+  FINAL_DELAY_WORKERS=0
+  FINAL_DELAY_PASSED_COUNT=0
+  FINAL_DELAY_ELAPSED_MS=0
+fi
   cleanup_mihomo
 else
   SPEED_ELAPSED_MS=0
@@ -438,6 +557,11 @@ else
   GEO_ELAPSED_MS=0
   GEO_RESULTS_FILE="$BASE_WORK/geo_results.json"
   printf '[]\n' >"$GEO_RESULTS_FILE"
+  FINAL_DELAY_WORKERS=0
+  FINAL_DELAY_PASSED_COUNT=0
+  FINAL_DELAY_ELAPSED_MS=0
+  FINAL_DELAY_RESULTS_FILE="$BASE_WORK/final_delay_results.json"
+  printf '[]\n' >"$FINAL_DELAY_RESULTS_FILE"
 fi
 
 FUNCTION_END_MS="$(date +%s%3N)"
@@ -466,6 +590,7 @@ jq -cn \
   --slurpfile chunks "$CHUNKS_ARRAY_FILE" \
   --slurpfile speed_results "$SPEED_RESULTS_FILE" \
   --slurpfile geo_results "$GEO_RESULTS_FILE" '
+--slurpfile final_delay "$FINAL_DELAY_RESULTS_FILE" \
   def pct($a; $p):
     if ($a|length) == 0 then null
     elif ($a|length) == 1 then $a[0]
@@ -503,15 +628,20 @@ jq -cn \
   | ($geo_results[0] // []) as $geo_results
   | INDEX($speed_results[]; .key) as $speed_index
   | INDEX($geo_results[]; .key) as $geo_index
+  | INDEX($final_delay[0][]; .key) as $final_delay_index
   | (
       $alive_nodes
       | map(
           . as $alive
           | ($mapping[$alive.key] // {}) as $m
           | ($speed_index[$alive.key] // {}) as $s
+        | ($final_delay_index[$alive.key] // {}) as $fd
           | {
               key:$alive.key,
               ru_delay_ms:$alive.value,
+          ru_delay_first_ms:$alive.value,
+          ru_delay_final_ms:(if (($fd.ok // false) == true and (($fd.total_ms // 0) > 0)) then $fd.total_ms else null end),
+          ru_delay_avg_ms:(if (($fd.ok // false) == true and (($fd.total_ms // 0) > 0)) then (($alive.value + $fd.total_ms) / 2) else null end),
               protocol:($m.protocol // null),
               source_index:($m.source_index // null),
               selected_index:($m.selected_index // null),
@@ -590,7 +720,12 @@ jq -cn \
         )
     ) as $geo_allowed_sorted
   | (
-      reduce $geo_allowed_sorted[] as $item (
+      $geo_allowed_sorted
+      | map(select(.ru_delay_final_ms != null and .ru_delay_avg_ms != null))
+      | sort_by(.ru_delay_avg_ms)
+    ) as $final_delay_sorted
+  | (
+      reduce $final_delay_sorted[] as $item (
         {counts:{}, items:[], duplicate_suffixes_added:0, vmess_ps_rewritten:0, naming_failed:0};
         ($item.base_display_name) as $base
         | ((.counts[$base] // 0) + 1) as $seq
