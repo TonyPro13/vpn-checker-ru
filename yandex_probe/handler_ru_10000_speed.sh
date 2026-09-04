@@ -594,7 +594,7 @@ jq -cn \
   --slurpfile alive_nodes "$ALIVE_ARRAY_FILE" \
   --slurpfile chunks "$CHUNKS_ARRAY_FILE" \
   --slurpfile speed_results "$SPEED_RESULTS_FILE" \
-  --slurpfile geo_results "$GEO_RESULTS_FILE" '
+  --slurpfile geo_results "$GEO_RESULTS_FILE" \
 --slurpfile final_delay "$FINAL_DELAY_RESULTS_FILE" \
   '
   def pct($a; $p):
