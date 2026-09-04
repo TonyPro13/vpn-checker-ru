@@ -443,6 +443,7 @@ fi
   CASCADE_ELAPSED_MS=$((CASCADE_END_MS - CASCADE_START_MS))
 
   echo "Cascade stage complete: input=$CASCADE_INPUT_COUNT passed=$CASCADE_PASSED_COUNT removed=$((CASCADE_INPUT_COUNT-CASCADE_PASSED_COUNT)) elapsed_ms=$CASCADE_ELAPSED_MS" >&2
+  jq -r '[.[] | if (.cascade_ok // false) then "passed" else (.failed_stage // "unknown") end] | sort | group_by(.) | .[] | "Cascade result: (.[0])=(length)"' "$CASCADE_RESULTS_FILE" >&2
 else
   CASCADE_WORKERS=0
   CASCADE_PASSED_COUNT=0
