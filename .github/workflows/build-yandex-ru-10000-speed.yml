@@ -160,7 +160,7 @@ jobs:
             handler.sh \
             meta.json \
             mapping.json \
-        source_by_uri.json \
+          source_by_uri.json \
             proxy_defs.json \
             manifest.json \
             config_*.yaml \
