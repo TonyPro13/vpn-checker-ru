@@ -596,6 +596,7 @@ jq -cn \
   --slurpfile speed_results "$SPEED_RESULTS_FILE" \
   --slurpfile geo_results "$GEO_RESULTS_FILE" '
 --slurpfile final_delay "$FINAL_DELAY_RESULTS_FILE" \
+  '
   def pct($a; $p):
     if ($a|length) == 0 then null
     elif ($a|length) == 1 then $a[0]
