@@ -193,6 +193,7 @@ func socks5Connect(parent context.Context, proxyPort int, host string, port int,
 	header := make([]byte, 4)
 	if _, err = io.ReadFull(conn, header); err != nil {
 		return nil, err
+	}
 
         if header[0] != 0x05 {
                 return nil, fmt.Errorf("socks_bad_version_%d", header[0])
