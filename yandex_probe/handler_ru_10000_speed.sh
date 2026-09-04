@@ -414,9 +414,14 @@ if [[ "$CASCADE_INPUT_COUNT" -gt 0 ]]; then
     --group-prefix "SPEED-" \
     --base-port 20000 \
     --concurrency "$CASCADE_WORKERS" \
-    >"$CASCADE_RESULTS_FILE"
+    >"$CASCADE_RESULTS_FILE" 2>"$BASE_WORK/cascade.stderr.log"
 
   CASCADE_STATUS=$?
+if [[ -s "$BASE_WORK/cascade.stderr.log" ]]; then
+  echo "=== cascade stderr ===" >&2
+  cat "$BASE_WORK/cascade.stderr.log" >&2
+  echo "=== end cascade stderr ===" >&2
+fi
   CASCADE_END_MS="$(date +%s%3N)"
 
   if [[ "$CASCADE_STATUS" -ne 0 ]] || ! jq -e 'type=="array"' "$CASCADE_RESULTS_FILE" >/dev/null 2>&1; then
