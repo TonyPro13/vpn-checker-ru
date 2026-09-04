@@ -59,6 +59,9 @@ jobs:
           file speed_probe
           ls -lh speed_probe
 
+      - name: Collect fresh VPN configs
+        run: MAX_UNIQUE=0 python collector.py
+
       - name: Convert current 10000 and preserve URI mapping
         run: |
           python yandex_probe/build_ru_output_batch.py \
