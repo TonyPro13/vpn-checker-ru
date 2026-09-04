@@ -445,6 +445,7 @@ fi
 
   echo "Cascade stage complete: input=$CASCADE_INPUT_COUNT passed=$CASCADE_PASSED_COUNT removed=$((CASCADE_INPUT_COUNT-CASCADE_PASSED_COUNT)) elapsed_ms=$CASCADE_ELAPSED_MS" >&2
   jq -r '[.[] | if (.cascade_ok // false) then "passed" else (.failed_stage // "unknown") end] | sort | group_by(.) | .[] | "Cascade result: " + .[0] + "=" + (length|tostring)' "$CASCADE_RESULTS_FILE" >&2
+  jq -r '"[.[] | select((.failed_stage // "") == "telegram_mtproto") | (.error // "unknown")] | sort | group_by(.) | .[] | "Telegram MTProto error: " + .[0] + "=" + (length|tostring)"' "$CASCADE_RESULTS_FILE" >&2
 else
   CASCADE_WORKERS=0
   CASCADE_PASSED_COUNT=0
