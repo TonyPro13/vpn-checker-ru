@@ -15,7 +15,7 @@ PROXY_DEFS="$ROOT/proxy_defs.json"
 SPEED_BYTES=524288
 SPEED_CONCURRENCY=8
 SPEED_TIMEOUT_SECONDS=8
-SPEED_MIN_MBPS=3
+SPEED_MIN_MBPS=1
 SPEED_URL_BASE="https://speed.cloudflare.com/__down"
 GEO_URL="https://ipwho.is/?fields=ip,success,country,country_code,city,flag"
 GEO_FALLBACK_URL=""

@@ -4,6 +4,7 @@ import base64
 import json
 import os
 import re
+from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from urllib.parse import parse_qsl, unquote, urlsplit
@@ -271,6 +272,33 @@ def load_sources() -> list[str]:
         if line not in seen:
             seen.add(line)
             result.append(line)
+
+    # Dynamic daily donors.
+    today = datetime.now(timezone(timedelta(hours=5)))
+    ymd = today.strftime("%Y%m%d")
+    yyyy = today.strftime("%Y")
+    mm = today.strftime("%m")
+
+    dynamic_sources = [
+        f"https://wanzhuanmi.cczzuu.top/node/{ymd}.txt",
+        f"https://stairnode.cczzuu.top/node/{ymd}.txt",
+    ]
+
+    dynamic_sources.extend(
+        f"https://node.freev2raynode.com/uploads/{yyyy}/{mm}/{i}-{ymd}.txt"
+        for i in range(5)
+    )
+
+    # Previous published subscription is checked again like every other candidate.
+    # It is intentionally last so current donors get source attribution first.
+    dynamic_sources.append(
+        "https://storage.yandexcloud.net/tony-vpn-subscription-2026/subscription.txt"
+    )
+
+    for url in dynamic_sources:
+        if url not in seen:
+            seen.add(url)
+            result.append(url)
 
     if not result:
         raise SystemExit("sources.txt contains no source URLs")
