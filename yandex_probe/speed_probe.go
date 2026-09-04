@@ -228,6 +228,7 @@ func socks5Connect(parent context.Context, proxyPort int, host string, port int,
 
         ok = true
         return conn, nil
+}
 
 
 
