@@ -61,14 +61,14 @@ jobs:
           chmod +x speed_probe
           file speed_probe
 
+      cd yandex_probe
       CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
         go build -trimpath -ldflags="-s -w" \
         -o ../mihomo_autoselect ../client/mihomo_autoselect.go
-
       cd ..
       chmod +x mihomo_autoselect
       file mihomo_autoselect
-          ls -lh speed_probe
+      ls -lh mihomo_autoselect
 
       - name: Collect fresh VPN configs
         run: MAX_UNIQUE=0 python collector.py
