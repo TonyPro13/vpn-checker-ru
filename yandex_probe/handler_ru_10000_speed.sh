@@ -730,7 +730,7 @@ jq -cn \
     ) as $geo_allowed_sorted
   | (
       $geo_allowed_sorted
-      | map(select(.ru_delay_final_ms != null and .ru_delay_avg_ms != null))
+      | map(select(.ru_delay_final_ms != null and .ru_delay_avg_ms != null and (((.ru_delay_first_ms // 0) <= 1500) or ((.ru_delay_final_ms // 0) <= 1500))))
       | sort_by(.ru_delay_avg_ms)
     ) as $final_delay_sorted
   | (
@@ -789,6 +789,7 @@ jq -cn \
   | (($geo_complete_sorted|length) - ($geo_allowed_sorted|length)) as $removed_country_excluded
   | ([$survivors[] | select(.speed_test_ok != true)] | length) as $removed_speed_failed
   | ([$survivors[] | select(.speed_test_ok == true and (.speed_mbps // 0) < $speed_min_mbps)] | length) as $removed_below_threshold
+| ([$geo_allowed_sorted[] | select(.ru_delay_final_ms != null and .ru_delay_avg_ms != null and ((.ru_delay_first_ms // 0) > 1500) and ((.ru_delay_final_ms // 0) > 1500))] | length) as $removed_both_delay_over_1500
   | {
       ok:true,
       mihomo_version:$version,
@@ -884,6 +885,7 @@ jq -cn \
         success_complete:($geo_complete_sorted|length),
         removed_geo_failed:$removed_geo_failed,
         removed_country_excluded:$removed_country_excluded,
+    removed_both_delay_over_1500:$removed_both_delay_over_1500,
         removed_country_ru:$removed_country_ru,
         removed_country_ua:$removed_country_ua,
         after_country_exclusion:($geo_allowed_sorted|length),
@@ -1376,12 +1378,8 @@ if len(names) != len(set(names)):
 # still allows manual selection in clients that expose the group.
 auto_group = {
     "name": "AUTO",
-    "type": "url-test",
+    "type": "select",
     "proxies": names,
-    "url": "https://cp.cloudflare.com",
-    "interval": 120,
-    "tolerance": 20,
-    "lazy": True,
 }
 vpn_group = {
     "name": "VPN",
@@ -1397,6 +1395,7 @@ with out_path.open("w", encoding="utf-8", newline="\n") as f:
     f.write("ipv6: true\n")
     f.write("unified-delay: true\n")
     f.write("tcp-concurrent: true\n")
+    f.write("external-controller: 127.0.0.1:9090\n")
     f.write("\nproxies:\n")
     for proxy in proxies:
         f.write("  - ")

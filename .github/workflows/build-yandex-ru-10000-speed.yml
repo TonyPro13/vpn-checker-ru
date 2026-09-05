@@ -60,6 +60,14 @@ jobs:
           cd ..
           chmod +x speed_probe
           file speed_probe
+
+      CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+        go build -trimpath -ldflags="-s -w" \
+        -o ../mihomo_autoselect ../client/mihomo_autoselect.go
+
+      cd ..
+      chmod +x mihomo_autoselect
+      file mihomo_autoselect
           ls -lh speed_probe
 
       - name: Collect fresh VPN configs
@@ -145,6 +153,8 @@ jobs:
 
           cp mihomo package_ru_speed/mihomo
           cp speed_probe package_ru_speed/speed_probe
+      package_ru_speed/mihomo_autoselect
+      cp mihomo_autoselect package_ru_speed/mihomo_autoselect
           cp yandex_probe/handler_ru_10000_speed.sh package_ru_speed/handler.sh
           cp yandex_probe/generated_ru_speed/meta.json package_ru_speed/meta.json
           cp yandex_probe/generated_ru_speed/mapping.json package_ru_speed/mapping.json
@@ -153,10 +163,11 @@ jobs:
           cp yandex_probe/generated_ru_speed/chunks/manifest.json package_ru_speed/manifest.json
           cp yandex_probe/generated_ru_speed/chunks/config_*.yaml package_ru_speed/
 
-          chmod +x \
-            package_ru_speed/handler.sh \
-            package_ru_speed/mihomo \
-            package_ru_speed/speed_probe
+      chmod +x \
+        package_ru_speed/handler.sh \
+        package_ru_speed/mihomo \
+        package_ru_speed/speed_probe \
+        package_ru_speed/mihomo_autoselect
 
           cd package_ru_speed
           zip -9 ../yandex-mihomo-ru-10000-speed.zip \
@@ -168,7 +179,8 @@ jobs:
             manifest.json \
             config_*.yaml \
             mihomo \
-            speed_probe
+        speed_probe \
+        mihomo_autoselect
           cd ..
 
           echo "===== package ====="
