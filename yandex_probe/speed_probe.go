@@ -19,6 +19,11 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/gotd/td/telegram"
+	"github.com/gotd/td/telegram/dcs"
+	"github.com/gotd/td/transport"
+	"golang.org/x/net/proxy"
 )
 
 type Job struct {
@@ -232,118 +237,51 @@ func socks5Connect(parent context.Context, proxyPort int, host string, port int,
 
 
 
-func telegramReqPQOnce(parent context.Context, proxyPort int, host string, remotePort int, timeout time.Duration) (bool, int64, string) {
+func runTelegramMTProto(parent context.Context, proxyPort int, timeout time.Duration) (bool, int64, string) {
 	start := time.Now()
 
-	conn, err := socks5Connect(parent, proxyPort, host, remotePort, timeout)
+	ctx, cancel := context.WithTimeout(parent, timeout)
+	defer cancel()
+
+	socks, err := proxy.SOCKS5(
+		"tcp",
+		fmt.Sprintf("127.0.0.1:%d", proxyPort),
+		nil,
+		proxy.Direct,
+	)
+	if err != nil {
+		return false, time.Since(start).Milliseconds(), "socks5_create:" + err.Error()
+	}
+
+	dialer, ok := socks.(proxy.ContextDialer)
+	if !ok {
+		return false, time.Since(start).Milliseconds(), "socks5_no_context_dialer"
+	}
+
+	resolver := dcs.Plain(dcs.PlainOptions{
+		Protocol:   transport.Abridged,
+		Dial:       dialer.DialContext,
+		Obfuscated: true,
+	})
+
+	client := telegram.NewClient(
+		telegram.TestAppID,
+		telegram.TestAppHash,
+		telegram.Options{
+			Resolver:  resolver,
+			NoUpdates: true,
+		},
+	)
+
+	err = client.Run(ctx, func(ctx context.Context) error {
+		_, err := client.API().HelpGetNearestDC(ctx)
+		return err
+	})
 	if err != nil {
 		return false, time.Since(start).Milliseconds(), err.Error()
 	}
-	defer conn.Close()
-
-	_ = conn.SetDeadline(time.Now().Add(timeout))
-
-	nonce := make([]byte, 16)
-	if _, err = rand.Read(nonce); err != nil {
-		return false, time.Since(start).Milliseconds(), err.Error()
-	}
-
-	body := make([]byte, 20)
-	binary.LittleEndian.PutUint32(body[0:4], 0xBE7E8EF1)
-	copy(body[4:20], nonce)
-
-	payload := make([]byte, 20+len(body))
-	binary.LittleEndian.PutUint64(payload[8:16], uint64(time.Now().Unix())<<32)
-	binary.LittleEndian.PutUint32(payload[16:20], uint32(len(body)))
-	copy(payload[20:], body)
-
-	if len(payload)%4 != 0 {
-		return false, time.Since(start).Milliseconds(), "mtproto_payload_not_divisible_by_4"
-	}
-
-	words := len(payload) / 4
-	if words < 1 || words > 0x7e {
-		return false, time.Since(start).Milliseconds(), "mtproto_invalid_packet_size"
-	}
-
-    if _, err = conn.Write([]byte{0xef}); err != nil {
-        return false, time.Since(start).Milliseconds(), err.Error()
-    }
-    packet := append([]byte{byte(words)}, payload...)
-	if _, err = conn.Write(packet); err != nil {
-		return false, time.Since(start).Milliseconds(), err.Error()
-	}
-
-	first := make([]byte, 1)
-	if _, err = io.ReadFull(conn, first); err != nil {
-		return false, time.Since(start).Milliseconds(), err.Error()
-	}
-
-	var responseWords int
-	if first[0] == 0x7f {
-		more := make([]byte, 3)
-		if _, err = io.ReadFull(conn, more); err != nil {
-			return false, time.Since(start).Milliseconds(), err.Error()
-		}
-		responseWords = int(more[0]) | int(more[1])<<8 | int(more[2])<<16
-	} else if first[0] >= 1 && first[0] <= 0x7e {
-		responseWords = int(first[0])
-	} else {
-		return false, time.Since(start).Milliseconds(), fmt.Sprintf("mtproto_bad_length_byte_%02x", first[0])
-	}
-
-	responseLen := responseWords * 4
-	if responseLen < 40 || responseLen > 4096 {
-		return false, time.Since(start).Milliseconds(), fmt.Sprintf("mtproto_bad_response_size_%d", responseLen)
-	}
-
-	response := make([]byte, responseLen)
-	if _, err = io.ReadFull(conn, response); err != nil {
-		return false, time.Since(start).Milliseconds(), err.Error()
-	}
-
-	if !bytes.Equal(response[:8], make([]byte, 8)) {
-		return false, time.Since(start).Milliseconds(), "mtproto_unexpected_encrypted_response"
-	}
-
-	bodyLen := int(binary.LittleEndian.Uint32(response[16:20]))
-	if bodyLen < 36 || 20+bodyLen > len(response) {
-		return false, time.Since(start).Milliseconds(), fmt.Sprintf("mtproto_bad_body_length_%d", bodyLen)
-	}
-
-	constructor := binary.LittleEndian.Uint32(response[20:24])
-	if constructor != 0x05162463 {
-		return false, time.Since(start).Milliseconds(), fmt.Sprintf("mtproto_bad_constructor_%08x", constructor)
-	}
-
-	if !bytes.Equal(response[24:40], nonce) {
-		return false, time.Since(start).Milliseconds(), "mtproto_nonce_mismatch"
-	}
 
 	return true, time.Since(start).Milliseconds(), ""
-}
-
-func runTelegramMTProto(parent context.Context, proxyPort int, timeout time.Duration) (bool, int64, string) {
-	endpoints := []string{
-		"149.154.167.50",
-		"149.154.167.51",
-	}
-
-	var errors []string
-	var totalMS int64
-
-	for _, host := range endpoints {
-		ok, elapsed, errText := telegramReqPQOnce(parent, proxyPort, host, 443, timeout)
-		totalMS += elapsed
-
-		if ok {
-			return true, totalMS, ""
-		}
-
-		errors = append(errors, host+":"+errText)
-	}
-
-	return false, totalMS, strings.Join(errors, ";")
 }
 
 func runCascade(parent context.Context, worker Worker, job Job) Result {

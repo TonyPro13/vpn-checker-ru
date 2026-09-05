@@ -51,10 +51,13 @@ jobs:
         run: |
           set -euo pipefail
 
+          cd yandex_probe
+          go mod tidy
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
             go build -trimpath -ldflags="-s -w" \
-            -o speed_probe yandex_probe/speed_probe.go
+            -o ../speed_probe .
 
+          cd ..
           chmod +x speed_probe
           file speed_probe
           ls -lh speed_probe
