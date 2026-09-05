@@ -375,6 +375,28 @@ func runCascade(parent context.Context, worker Worker, job Job) Result {
 		return fail("telegram_mtproto", errText)
 	}
 
+	// 8. WhatsApp HTTPS: any real HTTP response.
+	if ok, status, _, errText := runHTTPCheck(
+		parent,
+		worker,
+		"https://web.whatsapp.com/",
+		0,
+		8*time.Second,
+	); !ok {
+		return fail("whatsapp_https", fmt.Sprintf("status=%d error=%s", status, errText))
+	}
+
+	// 9. Instagram HTTPS: any real HTTP response.
+	if ok, status, _, errText := runHTTPCheck(
+		parent,
+		worker,
+		"https://www.instagram.com/",
+		0,
+		8*time.Second,
+	); !ok {
+		return fail("instagram_https", fmt.Sprintf("status=%d error=%s", status, errText))
+	}
+
 	res.OK = true
 	res.CascadeOK = true
 	res.CascadeTotalMS = time.Since(start).Milliseconds()

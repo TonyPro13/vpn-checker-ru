@@ -1379,8 +1379,8 @@ auto_group = {
     "type": "url-test",
     "proxies": names,
     "url": "https://cp.cloudflare.com",
-    "interval": 300,
-    "tolerance": 50,
+    "interval": 120,
+    "tolerance": 20,
     "lazy": True,
 }
 vpn_group = {
