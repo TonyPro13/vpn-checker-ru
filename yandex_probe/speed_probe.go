@@ -3,8 +3,6 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"crypto/rand"
-	"encoding/binary"
 	"context"
 	"encoding/json"
 	"flag"
