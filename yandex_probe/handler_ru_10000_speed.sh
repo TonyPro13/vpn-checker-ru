@@ -351,6 +351,7 @@ if [[ "$ALIVE_COUNT" -gt 0 ]]; then
   SPEED_START_MS="$(date +%s%3N)"
   SPEED_URL="${SPEED_URL_BASE}?bytes=${SPEED_BYTES}&measId=${REQUEST_ID:-manual}"
 
+set +e
   "$SPEED_BIN" \
     --jobs "$SPEED_JOBS" \
     --url "$SPEED_URL" \
@@ -363,6 +364,7 @@ if [[ "$ALIVE_COUNT" -gt 0 ]]; then
     >"$SPEED_RESULTS_FILE"
 
   SPEED_STATUS=$?
+set -e
   SPEED_END_MS="$(date +%s%3N)"
   SPEED_ELAPSED_MS=$((SPEED_END_MS - SPEED_START_MS))
 
@@ -408,6 +410,7 @@ if [[ "$CASCADE_INPUT_COUNT" -gt 0 ]]; then
   echo "Cascade stage: input=$CASCADE_INPUT_COUNT workers=$CASCADE_WORKERS" >&2
   CASCADE_START_MS="$(date +%s%3N)"
 
+  set +e
   "$SPEED_BIN" \
     --mode cascade \
     --jobs "$FINAL_KEYS_FILE" \
@@ -418,6 +421,7 @@ if [[ "$CASCADE_INPUT_COUNT" -gt 0 ]]; then
     >"$CASCADE_RESULTS_FILE" 2>"$BASE_WORK/cascade.stderr.log"
 
   CASCADE_STATUS=$?
+  set -e
 if [[ -s "$BASE_WORK/cascade.stderr.log" ]]; then
   echo "=== cascade stderr ===" >&2
   cat "$BASE_WORK/cascade.stderr.log" >&2
@@ -468,6 +472,7 @@ fi
 
     GEO_START_MS="$(date +%s%3N)"
 
+  set +e
     "$SPEED_BIN" \
       --mode geo \
       --jobs "$FINAL_KEYS_FILE" \
@@ -481,6 +486,7 @@ fi
       >"$GEO_RESULTS_FILE"
 
     GEO_STATUS=$?
+  set -e
     GEO_END_MS="$(date +%s%3N)"
     GEO_ELAPSED_MS=$((GEO_END_MS - GEO_START_MS))
 
@@ -529,6 +535,7 @@ if [[ "$FINAL_DELAY_INPUT_COUNT" -gt 0 ]]; then
   echo "Final RU delay stage: input=$FINAL_DELAY_INPUT_COUNT workers=$FINAL_DELAY_WORKERS url=$FINAL_DELAY_URL" >&2
   FINAL_DELAY_START_MS="$(date +%s%3N)"
 
+  set +e
   "$SPEED_BIN" \
     --mode delay \
     --jobs "$FINAL_DELAY_KEYS_FILE" \
@@ -539,6 +546,7 @@ if [[ "$FINAL_DELAY_INPUT_COUNT" -gt 0 ]]; then
     >"$FINAL_DELAY_RESULTS_FILE"
 
   FINAL_DELAY_STATUS=$?
+  set -e
   FINAL_DELAY_END_MS="$(date +%s%3N)"
   FINAL_DELAY_ELAPSED_MS=$((FINAL_DELAY_END_MS - FINAL_DELAY_START_MS))
 
