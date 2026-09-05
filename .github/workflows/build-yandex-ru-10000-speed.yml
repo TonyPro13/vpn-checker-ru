@@ -142,7 +142,6 @@ jobs:
             echo "Validating $file"
             ./mihomo -t -f "$file"
           done < <(find yandex_probe/generated_ru_speed/chunks -name 'config_*.yaml' | sort)
-
       - name: Build Yandex RU plus speed package
         shell: bash
         run: |
@@ -151,10 +150,9 @@ jobs:
           rm -rf package_ru_speed
           mkdir package_ru_speed
 
-        cp mihomo package_ru_speed/mihomo
-        cp speed_probe package_ru_speed/speed_probe
-        package_ru_speed/mihomo_autoselect
-        cp mihomo_autoselect package_ru_speed/mihomo_autoselect
+          cp mihomo package_ru_speed/mihomo
+          cp speed_probe package_ru_speed/speed_probe
+          cp mihomo_autoselect package_ru_speed/mihomo_autoselect
           cp yandex_probe/handler_ru_10000_speed.sh package_ru_speed/handler.sh
           cp yandex_probe/generated_ru_speed/meta.json package_ru_speed/meta.json
           cp yandex_probe/generated_ru_speed/mapping.json package_ru_speed/mapping.json
@@ -163,29 +161,15 @@ jobs:
           cp yandex_probe/generated_ru_speed/chunks/manifest.json package_ru_speed/manifest.json
           cp yandex_probe/generated_ru_speed/chunks/config_*.yaml package_ru_speed/
 
-              chmod +x \
-                package_ru_speed/handler.sh \
-                package_ru_speed/mihomo \
-                package_ru_speed/speed_probe \
-                package_ru_speed/mihomo_autoselect
+          chmod +x package_ru_speed/handler.sh package_ru_speed/mihomo package_ru_speed/speed_probe package_ru_speed/mihomo_autoselect
 
-                  cd package_ru_speed
-                  zip -9 ../yandex-mihomo-ru-10000-speed.zip \
-                    handler.sh \
-                    meta.json \
-                    mapping.json \
-                  source_by_uri.json \
-                    proxy_defs.json \
-                    manifest.json \
-                    config_*.yaml \
-                    mihomo \
-                speed_probe \
-                mihomo_autoselect
-                  cd ..
-        
-                  echo "===== package ====="
-                  ls -lh yandex-mihomo-ru-10000-speed.zip
-                  unzip -l yandex-mihomo-ru-10000-speed.zip | tail -n 25
+          cd package_ru_speed
+          zip -9 ../yandex-mihomo-ru-10000-speed.zip handler.sh meta.json mapping.json source_by_uri.json proxy_defs.json manifest.json config_*.yaml mihomo speed_probe mihomo_autoselect
+          cd ..
+
+          echo "===== package ====="
+          ls -lh yandex-mihomo-ru-10000-speed.zip
+          unzip -l yandex-mihomo-ru-10000-speed.zip | tail -n 25
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
