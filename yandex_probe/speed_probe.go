@@ -360,7 +360,7 @@ func runCascade(parent context.Context, worker Worker, job Job) Result {
 		worker,
 		"https://venus.web.telegram.org/api",
 		0,
-		3*time.Second,
+		8*time.Second,
 	); !ok {
 		return fail("telegram_https", fmt.Sprintf("status=%d error=%s", status, errText))
 	}
@@ -369,7 +369,7 @@ func runCascade(parent context.Context, worker Worker, job Job) Result {
 	if ok, _, errText := runTelegramMTProto(
 		parent,
 		worker.Port,
-		3*time.Second,
+		8*time.Second,
 	); !ok {
 		fmt.Fprintf(os.Stderr, "MTProto failure: %s\n", errText)
 		return fail("telegram_mtproto", errText)
@@ -691,7 +691,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "jobs and url are required")
 		os.Exit(2)
 	}
-	if *mode != "speed" && *mode != "geo" && *mode != "cascade" {
+	if *mode != "speed" && *mode != "geo" && *mode != "cascade" && *mode != "delay" {
 		fmt.Fprintln(os.Stderr, "mode must be speed, geo, cascade or delay")
 		os.Exit(2)
 	}
@@ -747,7 +747,7 @@ func main() {
 					*controller,
 					worker.GroupName,
 					item.Job.Key,
-					3*time.Second,
+					8*time.Second,
 				); err != nil {
 					results[item.Index] = Result{
 						Key:   item.Job.Key,
