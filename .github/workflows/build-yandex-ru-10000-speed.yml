@@ -151,11 +151,10 @@ jobs:
           rm -rf package_ru_speed
           mkdir package_ru_speed
 
-          cp mihomo package_ru_speed/mihomo
-          cp speed_probe package_ru_speed/speed_probe
-              package_ru_speed/mihomo_autoselect
+        cp mihomo package_ru_speed/mihomo
+        cp speed_probe package_ru_speed/speed_probe
+        package_ru_speed/mihomo_autoselect
         cp mihomo_autoselect package_ru_speed/mihomo_autoselect
-              cp mihomo_autoselect package_ru_speed/mihomo_autoselect
           cp yandex_probe/handler_ru_10000_speed.sh package_ru_speed/handler.sh
           cp yandex_probe/generated_ru_speed/meta.json package_ru_speed/meta.json
           cp yandex_probe/generated_ru_speed/mapping.json package_ru_speed/mapping.json
