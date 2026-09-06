@@ -240,6 +240,7 @@ ALIVE_COUNT="$(jq 'length' "$ALIVE_ARRAY_FILE")"
 
 # Diagnostic only: donor efficiency after the initial RU chunk check.
 # Does not filter or modify any VPN keys.
+echo "Donor diagnostic v3: reached source_map=$([ -f "$SOURCE_BY_URI" ] && echo YES || echo NO) alive_file=$([ -f "$ALIVE_ARRAY_FILE" ] && echo YES || echo NO) alive_count=$ALIVE_COUNT" >&2
 jq -r \
   --slurpfile alive "$ALIVE_ARRAY_FILE" \
   --slurpfile src "$SOURCE_BY_URI" '
