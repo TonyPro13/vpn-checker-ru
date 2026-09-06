@@ -730,7 +730,7 @@ jq -cn \
     ) as $geo_allowed_sorted
   | (
       $geo_allowed_sorted
-      | map(select(.ru_delay_final_ms != null and .ru_delay_avg_ms != null))
+      | map(select(.ru_delay_final_ms != null and .ru_delay_avg_ms != null and (((.ru_delay_first_ms // 0) <= 1500) or ((.ru_delay_final_ms // 0) <= 1500))))
       | sort_by(.ru_delay_avg_ms)
     ) as $final_delay_sorted
   | (
