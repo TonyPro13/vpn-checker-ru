@@ -833,6 +833,7 @@ jq -cn \
       },
       function_elapsed_ms:$function_elapsed,
       ru_filter_elapsed_ms:$ru_filter_elapsed,
+    removed_both_ru_delay_over_1500:(($geo_allowed_sorted|length)-($final_delay_sorted|length)),
       requested:($meta.requested // null),
       pool_size:($meta.pool_size // null),
       selected:($meta.selected // null),
