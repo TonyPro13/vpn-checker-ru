@@ -351,7 +351,6 @@ if [[ "$ALIVE_COUNT" -gt 0 ]]; then
   SPEED_START_MS="$(date +%s%3N)"
   SPEED_URL="${SPEED_URL_BASE}?bytes=${SPEED_BYTES}&measId=${REQUEST_ID:-manual}"
 
-set +e
   "$SPEED_BIN" \
     --jobs "$SPEED_JOBS" \
     --url "$SPEED_URL" \
@@ -364,7 +363,6 @@ set +e
     >"$SPEED_RESULTS_FILE"
 
   SPEED_STATUS=$?
-set -e
   SPEED_END_MS="$(date +%s%3N)"
   SPEED_ELAPSED_MS=$((SPEED_END_MS - SPEED_START_MS))
 
@@ -410,7 +408,6 @@ if [[ "$CASCADE_INPUT_COUNT" -gt 0 ]]; then
   echo "Cascade stage: input=$CASCADE_INPUT_COUNT workers=$CASCADE_WORKERS" >&2
   CASCADE_START_MS="$(date +%s%3N)"
 
-  set +e
   "$SPEED_BIN" \
     --mode cascade \
     --jobs "$FINAL_KEYS_FILE" \
@@ -421,7 +418,6 @@ if [[ "$CASCADE_INPUT_COUNT" -gt 0 ]]; then
     >"$CASCADE_RESULTS_FILE" 2>"$BASE_WORK/cascade.stderr.log"
 
   CASCADE_STATUS=$?
-  set -e
 if [[ -s "$BASE_WORK/cascade.stderr.log" ]]; then
   echo "=== cascade stderr ===" >&2
   cat "$BASE_WORK/cascade.stderr.log" >&2
@@ -472,7 +468,6 @@ fi
 
     GEO_START_MS="$(date +%s%3N)"
 
-  set +e
     "$SPEED_BIN" \
       --mode geo \
       --jobs "$FINAL_KEYS_FILE" \
@@ -486,7 +481,6 @@ fi
       >"$GEO_RESULTS_FILE"
 
     GEO_STATUS=$?
-  set -e
     GEO_END_MS="$(date +%s%3N)"
     GEO_ELAPSED_MS=$((GEO_END_MS - GEO_START_MS))
 
@@ -535,7 +529,6 @@ if [[ "$FINAL_DELAY_INPUT_COUNT" -gt 0 ]]; then
   echo "Final RU delay stage: input=$FINAL_DELAY_INPUT_COUNT workers=$FINAL_DELAY_WORKERS url=$FINAL_DELAY_URL" >&2
   FINAL_DELAY_START_MS="$(date +%s%3N)"
 
-  set +e
   "$SPEED_BIN" \
     --mode delay \
     --jobs "$FINAL_DELAY_KEYS_FILE" \
@@ -546,7 +539,6 @@ if [[ "$FINAL_DELAY_INPUT_COUNT" -gt 0 ]]; then
     >"$FINAL_DELAY_RESULTS_FILE"
 
   FINAL_DELAY_STATUS=$?
-  set -e
   FINAL_DELAY_END_MS="$(date +%s%3N)"
   FINAL_DELAY_ELAPSED_MS=$((FINAL_DELAY_END_MS - FINAL_DELAY_START_MS))
 
@@ -738,7 +730,7 @@ jq -cn \
     ) as $geo_allowed_sorted
   | (
       $geo_allowed_sorted
-      | map(select(.ru_delay_final_ms != null and .ru_delay_avg_ms != null and (((.ru_delay_first_ms // 0) <= 1500) or ((.ru_delay_final_ms // 0) <= 1500))))
+      | map(select(.ru_delay_final_ms != null and .ru_delay_avg_ms != null))
       | sort_by(.ru_delay_avg_ms)
     ) as $final_delay_sorted
   | (
@@ -797,7 +789,6 @@ jq -cn \
   | (($geo_complete_sorted|length) - ($geo_allowed_sorted|length)) as $removed_country_excluded
   | ([$survivors[] | select(.speed_test_ok != true)] | length) as $removed_speed_failed
   | ([$survivors[] | select(.speed_test_ok == true and (.speed_mbps // 0) < $speed_min_mbps)] | length) as $removed_below_threshold
-| ([$geo_allowed_sorted[] | select(.ru_delay_final_ms != null and .ru_delay_avg_ms != null and ((.ru_delay_first_ms // 0) > 1500) and ((.ru_delay_final_ms // 0) > 1500))] | length) as $removed_both_delay_over_1500
   | {
       ok:true,
       mihomo_version:$version,
@@ -893,7 +884,6 @@ jq -cn \
         success_complete:($geo_complete_sorted|length),
         removed_geo_failed:$removed_geo_failed,
         removed_country_excluded:$removed_country_excluded,
-    removed_both_delay_over_1500:$removed_both_delay_over_1500,
         removed_country_ru:$removed_country_ru,
         removed_country_ua:$removed_country_ua,
         after_country_exclusion:($geo_allowed_sorted|length),
@@ -1386,8 +1376,12 @@ if len(names) != len(set(names)):
 # still allows manual selection in clients that expose the group.
 auto_group = {
     "name": "AUTO",
-    "type": "select",
+    "type": "url-test",
     "proxies": names,
+    "url": "https://cp.cloudflare.com",
+    "interval": 120,
+    "tolerance": 20,
+    "lazy": True,
 }
 vpn_group = {
     "name": "VPN",
@@ -1403,7 +1397,6 @@ with out_path.open("w", encoding="utf-8", newline="\n") as f:
     f.write("ipv6: true\n")
     f.write("unified-delay: true\n")
     f.write("tcp-concurrent: true\n")
-    f.write("external-controller: 127.0.0.1:9090\n")
     f.write("\nproxies:\n")
     for proxy in proxies:
         f.write("  - ")
