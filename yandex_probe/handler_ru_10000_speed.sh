@@ -262,7 +262,7 @@ jq -r \
   | sort_by(.checked)
   | reverse
   | .[]
-  | "Donor chunk result: source=\(.source) checked=\(.checked) alive=\(.alive) alive_pct=\(if .checked > 0 then ((.alive * 10000 / .checked | floor) / 100) else 0 end)"
+  | "Donor chunk result v2: source=\(.source) checked=\(.checked) alive=\(.alive) alive_pct=\(if .checked > 0 then ((.alive * 10000 / .checked | floor) / 100) else 0 end)"
 ' >&2 || echo "Donor chunk stats: failed (diagnostic only)" >&2
 
 SPEED_RESULTS_FILE="$BASE_WORK/speed_results.json"
@@ -760,6 +760,7 @@ jq -cn \
       | map(select(.ru_delay_final_ms != null and .ru_delay_avg_ms != null and (((.ru_delay_first_ms // 0) <= 1500) or ((.ru_delay_final_ms // 0) <= 1500))))
       | sort_by(.ru_delay_avg_ms)
     ) as $final_delay_sorted
+  | ("1500 ms filter: input=\($geo_allowed_sorted | length) passed=\($final_delay_sorted | length) removed=\(($geo_allowed_sorted | length) - ($final_delay_sorted | length))\n" | stderr) as $_filter_1500_log
   | (
       reduce $final_delay_sorted[] as $item (
         {counts:{}, items:[], duplicate_suffixes_added:0, vmess_ps_rewritten:0, naming_failed:0};
