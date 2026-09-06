@@ -238,6 +238,33 @@ jq -sc '.' "$CHUNKS_JSONL" >"$CHUNKS_ARRAY_FILE"
 
 ALIVE_COUNT="$(jq 'length' "$ALIVE_ARRAY_FILE")"
 
+# Diagnostic only: donor efficiency after the initial RU chunk check.
+# Does not filter or modify any VPN keys.
+jq -r \
+  --slurpfile alive "$ALIVE_ARRAY_FILE" \
+  --slurpfile src "$SOURCE_BY_URI" '
+  ($src[0] // {}) as $src
+  | ($alive[0] // []) as $alive
+  | [
+      ($src | to_entries[] | {source:.value, kind:"checked"}),
+      ($alive[]
+        | .uri as $u
+        | ($src[$u] // "unknown") as $s
+        | {source:$s, kind:"alive"})
+    ]
+  | sort_by(.source)
+  | group_by(.source)
+  | map({
+      source: .[0].source,
+      checked: (map(select(.kind == "checked")) | length),
+      alive: (map(select(.kind == "alive")) | length)
+    })
+  | sort_by(.checked)
+  | reverse
+  | .[]
+  | "Donor chunk result: source=\(.source) checked=\(.checked) alive=\(.alive) alive_pct=\(if .checked > 0 then ((.alive * 10000 / .checked | floor) / 100) else 0 end)"
+' >&2 || echo "Donor chunk stats: failed (diagnostic only)" >&2
+
 SPEED_RESULTS_FILE="$BASE_WORK/speed_results.json"
 printf '[]\n' >"$SPEED_RESULTS_FILE"
 
