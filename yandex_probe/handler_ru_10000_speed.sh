@@ -1,4 +1,6 @@
-#!/bin/bash
+echo "Donor diagnostic v3: reached source_map=$([ -f "$SOURCE_BY_URI" ] && echo YES || echo NO) alive_file=$([ -f "$ALIVE_ARRAY_FILE" ] && echo YES || echo NO) alive_count=$ALIVE_COUNT" >&2
+jq -r '"Donor diagnostic v4: source_type=\(type) source_entries=\(if type == "object" then length else -1 end)"' "$SOURCE_BY_URI" >&2
+jq -r '"Donor diagnostic v4: alive_type=\(type) alive_entries=\(if type == "array" then length else -1 end)"' "$ALIVE_ARRAY_FILE" >&2#!/bin/bash
 set -uo pipefail
 
 cat >/dev/null || true
