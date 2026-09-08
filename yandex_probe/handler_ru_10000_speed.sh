@@ -243,17 +243,20 @@ ALIVE_COUNT="$(jq 'length' "$ALIVE_ARRAY_FILE")"
 echo "Donor diagnostic v3: reached source_map=$([ -f "$SOURCE_BY_URI" ] && echo YES || echo NO) alive_file=$([ -f "$ALIVE_ARRAY_FILE" ] && echo YES || echo NO) alive_count=$ALIVE_COUNT" >&2
 jq -r '"Donor diagnostic v4: source_type=\(type) source_entries=\(if type == "object" then length else -1 end)"' "$SOURCE_BY_URI" >&2
 jq -r '"Donor diagnostic v4: alive_type=\(type) alive_entries=\(if type == "array" then length else -1 end)"' "$ALIVE_ARRAY_FILE" >&2
-jq -nr --slurpfile alive "$ALIVE_ARRAY_FILE" --slurpfile src "$SOURCE_BY_URI" "(\$src[0] // {}) as \$s | (\$alive[0] // []) as \$a | \"Donor diagnostic v5: source_keys=\(\$s | length) alive=\(\$a | length) matched=\([\$a[] | .uri as \$u | select(\$s[\$u] != null)] | length) unknown=\([\$a[] | .uri as \$u | select(\$s[\$u] == null)] | length) unique_sources=\([\$s[]] | unique | length)\"" >&2
+jq -nr --slurpfile alive "$ALIVE_ARRAY_FILE" --slurpfile src "$SOURCE_BY_URI" --slurpfile mapping "$MAPPING" '($src[0] // {}) as $s | ($alive[0] // []) as $a | ($mapping[0] // {}) as $m | "Donor diagnostic v5: source_keys=\($s | length) alive=\($a | length) matched=\([$a[] | ($m[.key] // {}) as $x | ($x.uri // null) as $u | select($u != null) | select($s[$u] != null)] | length) unknown=\([$a[] | ($m[.key] // {}) as $x | ($x.uri // null) as $u | select(if $u == null then true else ($s[$u] == null) end)] | length) unique_sources=\([$s[]] | unique | length)"' >&2
 jq -nr \
   --slurpfile alive "$ALIVE_ARRAY_FILE" \
   --slurpfile src "$SOURCE_BY_URI" '
+  --slurpfile mapping "$MAPPING" \
   ($src[0] // {}) as $src
+  | ($mapping[0] // {}) as $mapping
   | ($alive[0] // []) as $alive
   | [
       ($src | to_entries[] | {source:.value, kind:"checked"}),
       ($alive[]
-        | .uri as $u
-        | ($src[$u] // "unknown") as $s
+        | ($mapping[.key] // {}) as $m
+        | ($m.uri // null) as $u
+        | (if $u == null then "unknown" else ($src[$u] // "unknown") end) as $s
         | {source:$s, kind:"alive"})
     ]
   | sort_by(.source)
