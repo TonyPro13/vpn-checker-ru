@@ -246,9 +246,9 @@ jq -r '"Donor diagnostic v4: alive_type=\(type) alive_entries=\(if type == "arra
 jq -nr --slurpfile alive "$ALIVE_ARRAY_FILE" --slurpfile src "$SOURCE_BY_URI" --slurpfile mapping "$MAPPING" '($src[0] // {}) as $s | ($alive[0] // []) as $a | ($mapping[0] // {}) as $m | "Donor diagnostic v5: source_keys=\($s | length) alive=\($a | length) matched=\([$a[] | ($m[.key] // {}) as $x | ($x.uri // null) as $u | select($u != null) | select($s[$u] != null)] | length) unknown=\([$a[] | ($m[.key] // {}) as $x | ($x.uri // null) as $u | select(if $u == null then true else ($s[$u] == null) end)] | length) unique_sources=\([$s[]] | unique | length)"' >&2
 jq -nr \
   --slurpfile alive "$ALIVE_ARRAY_FILE" \
-  --slurpfile src "$SOURCE_BY_URI" '
+  --slurpfile src "$SOURCE_BY_URI" \
   --slurpfile mapping "$MAPPING" \
-  ($src[0] // {}) as $src
+'  ($src[0] // {}) as $src
   | ($mapping[0] // {}) as $mapping
   | ($alive[0] // []) as $alive
   | [
